@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Tasks"
+  short_description: "Maintain durable task files"
+  default_prompt: "Use $manage-tasks to update the task index and task files."
