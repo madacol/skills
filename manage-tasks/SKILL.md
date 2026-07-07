@@ -39,7 +39,7 @@ Ambiguous tasks may be recorded immediately so they are not lost, but ambiguity 
 
 ## Evidence Discipline
 
-Include evidence when it changes how the task should be understood or executed. Evidence can include user statements, logs, screenshots, command output, traces, file paths, decisions, failed attempts, or any other useful source. Keep the main task file readable; split large evidence into linked files when that improves scanability.
+Include evidence when it changes how the task should be understood or executed. Evidence can include user statements, logs, screenshots, command output, traces, file paths, decisions, failed attempts, or any other useful source. When the user attaches media or quotes a message as the reason for a task, reference that media or quote in the task file. Keep the main task file readable; split large evidence into linked files when that improves scanability.
 
 ## Completion Discipline
 
