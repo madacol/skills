@@ -1,6 +1,6 @@
 ---
 name: manage-tasks
-description: Maintain durable task tracking files for ongoing work. Use when asked to add, update, clarify, investigate, complete, archive, or review todos/tasks; when managing tasks/todo.md, tasks/done/, task files, evidence files, blockers, acceptance criteria, or durable work notes; or when a task must survive beyond the current chat context.
+description: "Maintain durable task tracking files for ongoing work: todos, task briefs, evidence, blockers, acceptance criteria, and completed-task archives."
 ---
 
 # Manage Tasks
