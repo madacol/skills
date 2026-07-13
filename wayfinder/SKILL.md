@@ -1,6 +1,6 @@
 ---
 name: wayfinder
-description: Plan a huge chunk of work — more than one agent session can hold — as a Markdown map of investigation tickets under `.scratch/`, and resolve them one at a time until the way to the destination is clear.
+description: Use when work is too large or uncertain for one session and needs a Wayfinder map charted or its next investigation ticket resolved.
 disable-model-invocation: true
 ---
 

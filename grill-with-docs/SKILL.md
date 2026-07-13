@@ -1,6 +1,6 @@
 ---
 name: grill-with-docs
-description: A relentless interview to sharpen a plan or design while updating context documents and ADRs.
+description: Use when the user asks to be grilled on a plan or design while updating context documents and ADRs.
 disable-model-invocation: true
 ---
 

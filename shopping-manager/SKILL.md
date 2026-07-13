@@ -1,6 +1,6 @@
 ---
 name: shopping-manager
-description: Use when an agent needs shopping-management capability.
+description: Use when adding shopping-management capability to an agent.
 ---
 
 # Shopping Manager

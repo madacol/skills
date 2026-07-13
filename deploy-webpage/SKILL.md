@@ -1,6 +1,6 @@
 ---
 name: deploy-webpage
-description: Use when the user asks to deploy, publish, expose, or serve a webpage, website, static build, or small web app at a browser URL.
+description: Use when a webpage, static build, or small web app needs a browser-accessible URL.
 ---
 
 # Deploy Webpage

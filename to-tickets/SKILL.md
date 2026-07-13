@@ -1,6 +1,6 @@
 ---
 name: to-tickets
-description: Turn the current conversation, plan, or spec into Markdown ticket files under `.scratch/`. Use when the user asks to create tickets, file work, or turn a discussion into agent-ready tasks.
+description: Use when a conversation, plan, or spec needs to become agent-ready Markdown tickets under `.scratch/`.
 disable-model-invocation: true
 ---
 

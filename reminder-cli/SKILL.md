@@ -1,6 +1,6 @@
 ---
 name: reminder-cli
-description: Use when the user asks to set, list, or cancel WhatsApp reminders.
+description: Use when the user asks to create, list, or cancel a WhatsApp reminder.
 metadata:
   short-description: Manage WhatsApp reminders
 ---

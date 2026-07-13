@@ -1,6 +1,6 @@
 ---
 name: qa
-description: Interactive QA session where the user reports bugs conversationally and the agent writes durable Markdown tickets under `.scratch/`. Use when the user wants to report bugs, do QA, file tickets conversationally, or mentions "QA session".
+description: Use when the user wants to report bugs conversationally and capture each one as a durable ticket under `.scratch/`.
 ---
 
 # QA Session

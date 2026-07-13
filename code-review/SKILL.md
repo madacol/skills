@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Review committed or working-tree changes since a fixed point along two axes — Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match the originating spec or ticket?). Runs both reviews in parallel sub-agents and reports them side by side. Use when the user wants to review a branch, work-in-progress changes, or asks to "review since X".
+description: Use when reviewing changes since a fixed point against both repository standards and the originating spec or ticket.
 ---
 
 Two-axis review of committed or working-tree changes since a fixed point:

@@ -1,6 +1,6 @@
 ---
 name: manage-tasks
-description: "Maintain durable task tracking files for ongoing work: todos, task briefs, evidence, blockers, acceptance criteria, and completed-task archives."
+description: "Use when work needs durable state across turns or sessions: task briefs, evidence, blockers, acceptance criteria, or completion records."
 ---
 
 # Manage Tasks

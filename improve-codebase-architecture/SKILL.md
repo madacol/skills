@@ -1,6 +1,6 @@
 ---
 name: improve-codebase-architecture
-description: Find deepening opportunities in a codebase, informed by the project context map, owning documents, constraints, and ADRs. Use when the user wants to improve architecture, find refactoring opportunities, consolidate tightly-coupled modules, or make a codebase more testable and AI-navigable.
+description: Use when reviewing a codebase for deepening, consolidation, testability, or AI-navigability opportunities.
 ---
 
 # Improve Codebase Architecture

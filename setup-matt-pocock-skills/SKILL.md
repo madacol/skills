@@ -1,6 +1,6 @@
 ---
 name: setup-matt-pocock-skills
-description: Configure this repo for the engineering skills — set up its work files and context map. Run once before first use of the other engineering skills.
+description: Use once when a repo needs the work-file and context-map conventions required by the engineering skills.
 disable-model-invocation: true
 ---
 

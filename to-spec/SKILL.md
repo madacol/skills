@@ -1,6 +1,6 @@
 ---
 name: to-spec
-description: Synthesize the existing conversation into a spec under `.scratch/`, confirm its testing seams, and write the file.
+description: Use when settled conversation context should become an implementation-ready spec without another discovery interview.
 disable-model-invocation: true
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: domain-modeling
-description: Build and sharpen a project's domain model. Use when resolving terminology, ownership, constraints, or architectural decisions.
+description: Use when clarifying domain terminology, ownership, constraints, or durable architectural decisions.
 ---
 
 # Domain Modeling
