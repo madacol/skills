@@ -1,38 +1,38 @@
 ---
 name: to-tickets
-description: Turn the current conversation, plan, or spec into local Markdown ticket files. Use when the user asks to create tickets, file work locally, or turn a discussion into agent-ready local tasks without using GitHub or another remote tracker.
+description: Turn the current conversation, plan, or spec into Markdown ticket files under `.scratch/`. Use when the user asks to create tickets, file work, or turn a discussion into agent-ready tasks.
 disable-model-invocation: true
 ---
 
 # To Tickets
 
-Turn the current conversation, plan, or spec into **local Markdown ticket files**. Do not use GitHub, GitLab, Linear, Jira, `gh`, `glab`, or any remote tracker.
+Turn the current conversation, plan, or spec into **Markdown ticket files** under `.scratch/<work-slug>/`.
 
 ## Output Location
 
 Write files under:
 
 ```text
-.scratch/<short-work-slug>/
+.scratch/<work-slug>/
 ```
 
 Use this shape:
 
 ```text
-.scratch/<short-work-slug>/README.md
-.scratch/<short-work-slug>/tickets/01-<short-title>.md
-.scratch/<short-work-slug>/tickets/02-<short-title>.md
+.scratch/<work-slug>/README.md
+.scratch/<work-slug>/tickets/01-<short-title>.md
+.scratch/<work-slug>/tickets/02-<short-title>.md
 ```
 
 If the work is genuinely one slice, create only `tickets/01-<short-title>.md`. If it needs multiple independently implementable slices, create multiple ticket files in dependency order.
 
 ## Process
 
-1. Gather context from the current conversation. If the user passed a spec path, ticket path, issue path, or document path, read it first.
+1. Gather context from the current conversation. If the user passed a spec, ticket, or document path, read it first.
 2. Explore the codebase only enough to use the project's real domain vocabulary and avoid stale implementation guesses.
-3. Draft agent-ready local tickets as vertical slices: each ticket should deliver a complete, verifiable behavior or decision.
+3. Draft agent-ready tickets as vertical slices: each ticket should deliver a complete, verifiable behavior or decision.
 4. Show the proposed ticket list to the user before writing when the split is ambiguous.
-5. Write the local files after the breakdown is clear.
+5. Write the files after the breakdown is clear.
 
 ## README Template
 

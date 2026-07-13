@@ -1,11 +1,11 @@
 ---
 name: qa
-description: Interactive QA session where the user reports bugs conversationally and the agent files durable tickets in the project work tracker. Use when the user wants to report bugs, do QA, file tickets conversationally, or mentions "QA session".
+description: Interactive QA session where the user reports bugs conversationally and the agent writes durable Markdown tickets under `.scratch/`. Use when the user wants to report bugs, do QA, file tickets conversationally, or mentions "QA session".
 ---
 
 # QA Session
 
-Run an interactive QA session. The user describes problems they're encountering. You clarify, explore the codebase for context, and file durable, user-focused tickets in the project work tracker.
+Run an interactive QA session. The user describes problems they're encountering. You clarify, explore the codebase for context, and write durable, user-focused ticket files under `.scratch/`.
 
 ## For each ticket the user raises
 
@@ -46,7 +46,7 @@ Keep as a single ticket when:
 
 ### 4. File the ticket(s)
 
-Follow `docs/agents/issue-tracker.md` to create the tickets. Run `/setup-matt-pocock-skills` first if that file is missing. Do NOT ask the user to review first — just file and share references.
+Use the convention in `docs/agents/work-files.md`. Update `.scratch/<work-slug>/README.md`, write each ticket to `.scratch/<work-slug>/tickets/<NN>-<slug>.md`, and share the written paths.
 
 Tickets must be **durable** — they should still make sense after major refactors. Write from the user's perspective.
 

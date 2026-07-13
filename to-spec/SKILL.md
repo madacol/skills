@@ -1,12 +1,12 @@
 ---
 name: to-spec
-description: Synthesize the current conversation into a spec, confirm its testing seams, and publish it to the project work tracker without restarting discovery.
+description: Synthesize the existing conversation into a spec under `.scratch/`, confirm its testing seams, and write the file.
 disable-model-invocation: true
 ---
 
-Synthesize a spec from the existing conversation and codebase context. Do not conduct a new discovery interview or reopen settled product decisions. Before publishing, ask only for confirmation of the proposed testing seams.
+Synthesize the settled product decisions from the existing conversation and codebase context. Ask one confirmation question about the proposed testing seams, then write the file.
 
-The work tracker should have been provided to you — run `/setup-matt-pocock-skills` if not.
+Use the convention in `docs/agents/work-files.md` and write `.scratch/<work-slug>/SPEC.md`.
 
 ## Process
 
@@ -16,7 +16,7 @@ The work tracker should have been provided to you — run `/setup-matt-pocock-sk
 
 Ask the user to confirm that these seams match their expectations. This is the single confirmation gate, not a new discovery interview.
 
-3. Write the spec using the template below, then publish it to the project work tracker.
+3. Write the spec using the template below to `.scratch/<work-slug>/SPEC.md`, creating the workstream directory if needed.
 
 <spec-template>
 

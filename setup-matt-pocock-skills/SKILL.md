@@ -1,14 +1,14 @@
 ---
 name: setup-matt-pocock-skills
-description: Configure this repo for the engineering skills — set up its work tracker and context-map conventions. Run once before first use of the other engineering skills.
+description: Configure this repo for the engineering skills — set up its work files and context map. Run once before first use of the other engineering skills.
 disable-model-invocation: true
 ---
 
 # Setup Matt Pocock's Skills
 
-Scaffold the per-repo configuration that the engineering skills assume:
+Scaffold the per-repo files that the engineering skills assume:
 
-- **Work tracker** — where specs, tickets, and wayfinding maps live (GitHub by default; local markdown is also supported out of the box)
+- **Work files** — specs, tickets, and wayfinding maps under `.scratch/`
 - **Domain docs** — the `CONTEXT.md` map and its document ownership
 
 This is a prompt-driven skill, not a deterministic script. Explore, present what you found, confirm with the user, then write.
@@ -19,30 +19,16 @@ This is a prompt-driven skill, not a deterministic script. Explore, present what
 
 Look at the current repo to understand its starting state. Read whatever exists; don't assume:
 
-- `git remote -v` and `.git/config` — is this a GitHub repo? Which one?
 - `AGENTS.md` and `CLAUDE.md` at the repo root — does either exist? Is there already an `## Agent skills` section in either?
 - `CONTEXT.md` and its linked documents
-- `docs/agents/` — does this skill's prior output already exist?
-- `.scratch/` — sign that a local-markdown work tracker convention is already in use
+- `docs/agents/work-files.md` — does this skill's prior output already exist?
+- `.scratch/` — what work files already exist?
 
 ### 2. Present findings and ask
 
-Summarise what's present and missing. Walk through the work-tracker decision, then confirm the context map.
+Summarise what's present and missing, then confirm the work-file layout and context map.
 
-Assume the user does not know what these terms mean. Each section starts with a short explainer (what it is, why these skills need it, what changes if they pick differently). Then show the choices and the default.
-
-**Section A — Work tracker.**
-
-> Explainer: The "work tracker" is where durable specs, tickets, and wayfinding maps live for this repo. Skills such as `to-spec`, `qa`, and `wayfinder` need to know whether to call a platform's issue commands, write Markdown under `.scratch/`, or follow another workflow you describe. The `to-tickets` skill always creates local Markdown tickets and does not depend on this choice.
-
-Default posture: these skills were designed for GitHub. If a `git remote` points at GitHub, propose that. If a `git remote` points at GitLab (`gitlab.com` or a self-hosted host), propose GitLab. Otherwise (or if the user prefers), offer:
-
-- **GitHub** — work items use the repo's GitHub Issues (uses the `gh` CLI)
-- **GitLab** — work items use the repo's GitLab Issues (uses the [`glab`](https://gitlab.com/gitlab-org/cli) CLI)
-- **Local markdown** — specs and tickets live under `.scratch/<work>/` in this repo (good for solo projects or repos without a remote)
-- **Other** (Jira, Linear, etc.) — ask the user to describe the workflow in one paragraph; the skill will record it as freeform prose
-
-**Section B — Context map.**
+Use `.scratch/<work-slug>/SPEC.md` for the spec, `.scratch/<work-slug>/README.md` for the ticket index, and `.scratch/<work-slug>/tickets/` for tickets. Record the convention in `docs/agents/work-files.md`.
 
 Show what `CONTEXT.md` covers and any ownership gaps. If it does not exist, propose a minimal map and confirm it before writing.
 
@@ -50,8 +36,8 @@ Show what `CONTEXT.md` covers and any ownership gaps. If it does not exist, prop
 
 Show the user a draft of:
 
-- The `## Agent skills` block to add to whichever of `CLAUDE.md` / `AGENTS.md` is being edited (see step 4 for selection rules)
-- The contents of `docs/agents/issue-tracker.md`
+- The `## Agent skills` block to add to whichever of `CLAUDE.md` / `AGENTS.md` is being edited
+- The contents of `docs/agents/work-files.md`
 - Any proposed changes to `CONTEXT.md`
 
 Let them edit before writing.
@@ -73,19 +59,13 @@ The block:
 ```markdown
 ## Agent skills
 
-### Work tracker
+### Work files
 
-[one-line summary of where specs, tickets, and wayfinding maps are tracked]. See `docs/agents/issue-tracker.md`.
+Specs, tickets, QA reports, and Wayfinder maps live as Markdown under `.scratch/`. See `docs/agents/work-files.md`.
 ```
 
-Then write the tracker doc using the seed templates in this skill folder as a starting point, and update `CONTEXT.md` as confirmed:
-
-- [issue-tracker-github.md](./issue-tracker-github.md) — GitHub work tracker
-- [issue-tracker-gitlab.md](./issue-tracker-gitlab.md) — GitLab work tracker
-- [issue-tracker-local.md](./issue-tracker-local.md) — local-markdown work tracker
-
-For other work trackers, write `docs/agents/issue-tracker.md` from scratch using the user's description.
+Write `docs/agents/work-files.md` using [work-files.md](./work-files.md) as the starting point, and update `CONTEXT.md` as confirmed.
 
 ### 5. Done
 
-Tell the user the setup is complete and which engineering skills will now read from these files. Mention they can edit the tracker doc and `CONTEXT.md` directly later — re-running this skill is only necessary if they want to switch work trackers or restart from scratch.
+Tell the user the setup is complete and which engineering skills read these files. Mention they can edit `docs/agents/work-files.md` and `CONTEXT.md` directly later; re-run this skill only to repair or deliberately replace those conventions.

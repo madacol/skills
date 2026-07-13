@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Review committed or working-tree changes since a fixed point along two axes — Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match the originating spec or ticket?). Runs both reviews in parallel sub-agents and reports them side by side. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to "review since X".
+description: Review committed or working-tree changes since a fixed point along two axes — Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match the originating spec or ticket?). Runs both reviews in parallel sub-agents and reports them side by side. Use when the user wants to review a branch, work-in-progress changes, or asks to "review since X".
 ---
 
 Two-axis review of committed or working-tree changes since a fixed point:
@@ -9,8 +9,6 @@ Two-axis review of committed or working-tree changes since a fixed point:
 - **Spec** — does the code faithfully implement the originating spec or ticket?
 
 Both axes run as **parallel sub-agents** so they don't pollute each other's context, then this skill aggregates their findings.
-
-The work tracker should have been provided to you — run `/setup-matt-pocock-skills` if `docs/agents/issue-tracker.md` is missing.
 
 ## Process
 
@@ -31,9 +29,9 @@ Before going further, confirm the fixed point resolves (`git rev-parse <fixed-po
 
 Look for the originating spec, in this order:
 
-1. Ticket references in the commit messages (`#123`, `Closes #45`, GitLab `!67`, local ticket paths, etc.) — fetch via the workflow in `docs/agents/issue-tracker.md`.
+1. Ticket paths in the commit messages — read the referenced file.
 2. A path the user passed as an argument.
-3. A spec file under `docs/`, `specs/`, or `.scratch/` matching the branch name or feature.
+3. A `.scratch/<work-slug>/SPEC.md` matching the branch name or feature.
 4. If nothing is found, ask the user where the spec is. If they say there isn't one, the **Spec** sub-agent will skip and report "no spec available".
 
 ### 3. Identify the standards sources
