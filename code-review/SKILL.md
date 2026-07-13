@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Use when reviewing changes since a fixed point against both repository standards and the originating spec or ticket.
+description: Independent Standards-and-Spec review for complex changes at risk of repository-standard violations, scope drift, or missed spec/ticket requirements.
 ---
 
 Two-axis review of committed or working-tree changes since a fixed point:
