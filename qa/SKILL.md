@@ -1,13 +1,13 @@
 ---
 name: qa
-description: Interactive QA session where the user reports bugs conversationally and the agent files durable issues in the project tracker. Use when the user wants to report bugs, do QA, file issues conversationally, or mentions "QA session".
+description: Interactive QA session where the user reports bugs conversationally and the agent files durable tickets in the project work tracker. Use when the user wants to report bugs, do QA, file tickets conversationally, or mentions "QA session".
 ---
 
 # QA Session
 
-Run an interactive QA session. The user describes problems they're encountering. You clarify, explore the codebase for context, and file durable, user-focused issues in the project tracker.
+Run an interactive QA session. The user describes problems they're encountering. You clarify, explore the codebase for context, and file durable, user-focused tickets in the project work tracker.
 
-## For each issue the user raises
+## For each ticket the user raises
 
 ### 1. Listen and lightly clarify
 
@@ -27,11 +27,11 @@ While talking to the user, start an explorer sub-agent in the background to unde
 - Understand what the feature is supposed to do
 - Identify the user-facing behavior boundary
 
-This context helps you write a better issue — but the issue itself should NOT reference specific files, line numbers, or internal implementation details.
+This context helps you write a better ticket — but the ticket itself should NOT reference specific files, line numbers, or internal implementation details.
 
-### 3. Assess scope: single issue or breakdown?
+### 3. Assess scope: single ticket or breakdown?
 
-Before filing, decide whether this is a **single issue** or needs to be **broken down** into multiple issues.
+Before filing, decide whether this is a **single ticket** or needs to be **broken down** into multiple tickets.
 
 Break down when:
 
@@ -39,18 +39,18 @@ Break down when:
 - There are clearly separable concerns that different people could work on in parallel
 - The user describes something that has multiple distinct failure modes or symptoms
 
-Keep as a single issue when:
+Keep as a single ticket when:
 
 - It's one behavior that's wrong in one place
 - The symptoms are all caused by the same root behavior
 
-### 4. File the issue(s)
+### 4. File the ticket(s)
 
-Follow `docs/agents/issue-tracker.md` to create the issues. Run `/setup-matt-pocock-skills` first if that file is missing. Do NOT ask the user to review first — just file and share references.
+Follow `docs/agents/issue-tracker.md` to create the tickets. Run `/setup-matt-pocock-skills` first if that file is missing. Do NOT ask the user to review first — just file and share references.
 
-Issues must be **durable** — they should still make sense after major refactors. Write from the user's perspective.
+Tickets must be **durable** — they should still make sense after major refactors. Write from the user's perspective.
 
-#### For a single issue
+#### For a single ticket
 
 Use this template:
 
@@ -71,19 +71,19 @@ Use this template:
 
 ## Additional context
 
-[Any extra observations from the user or from codebase exploration that help frame the issue — e.g. "this only happens when using the Docker layer, not the filesystem layer" — use domain language but don't cite files]
+[Any extra observations from the user or from codebase exploration that help frame the ticket — e.g. "this only happens when using the Docker layer, not the filesystem layer" — use domain language but don't cite files]
 ```
 
-#### For a breakdown (multiple issues)
+#### For a breakdown (multiple tickets)
 
-Create issues in dependency order (blockers first) so you can reference real issue numbers.
+Create tickets in dependency order (blockers first) so you can reference stable ticket identities.
 
-Use this template for each sub-issue:
+Use this template for each sub-ticket:
 
 ```
-## Parent issue
+## Parent ticket
 
-#<parent-issue-number> (if you created a tracking issue) or "Reported during QA session"
+<parent-ticket-reference> (if you created a tracking ticket) or "Reported during QA session"
 
 ## What's wrong
 
@@ -95,11 +95,11 @@ Use this template for each sub-issue:
 
 ## Steps to reproduce
 
-1. [Steps specific to THIS issue]
+1. [Steps specific to THIS ticket]
 
 ## Blocked by
 
-- #<issue-number> (if this issue can't be fixed until another is resolved)
+- <ticket-reference> (if this ticket can't be fixed until another is resolved)
 
 Or "None — can start immediately" if no blockers.
 
@@ -110,21 +110,21 @@ Or "None — can start immediately" if no blockers.
 
 When creating a breakdown:
 
-- **Prefer many thin issues over few thick ones** — each should be independently fixable and verifiable
-- **Mark blocking relationships honestly** — if issue B genuinely can't be tested until issue A is fixed, say so. If they're independent, mark both as "None — can start immediately"
-- **Create issues in dependency order** so you can reference real issue numbers in "Blocked by"
-- **Maximize parallelism** — the goal is that multiple people (or agents) can grab different issues simultaneously
+- **Prefer many thin tickets over few thick ones** — each should be independently fixable and verifiable
+- **Mark blocking relationships honestly** — if ticket B genuinely can't be tested until ticket A is fixed, say so. If they're independent, mark both as "None — can start immediately"
+- **Create tickets in dependency order** so you can reference stable ticket identities in "Blocked by"
+- **Maximize parallelism** — the goal is that multiple people (or agents) can grab different tickets simultaneously
 
-#### Rules for all issue bodies
+#### Rules for all ticket bodies
 
 - **No file paths or line numbers** — these go stale
 - **Use the project's domain language** from the documents reached through `CONTEXT.md`
 - **Describe behaviors, not code** — "the sync service fails to apply the patch" not "applyPatch() throws on line 42"
 - **Reproduction steps are mandatory** — if you can't determine them, ask the user
-- **Keep it concise** — a developer should be able to read the issue in 30 seconds
+- **Keep it concise** — a developer should be able to read the ticket in 30 seconds
 
-After filing, print all issue references (with blocking relationships summarized) and ask: "Next issue, or are we done?"
+After filing, print all ticket references (with blocking relationships summarized) and ask: "Next ticket, or are we done?"
 
 ### 5. Continue the session
 
-Keep going until the user says they're done. Each issue is independent — don't batch them.
+Keep going until the user says they're done. Each ticket is independent — don't batch them.

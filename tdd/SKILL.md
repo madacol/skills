@@ -5,7 +5,7 @@ description: Test-driven development. Use when the user wants to build features 
 
 # Test-Driven Development
 
-TDD is the red → green loop. This skill is the reference that makes that loop produce tests worth keeping: what a good test is, where tests go, the anti-patterns, and the rules of the loop. Every section applies on every cycle — consult them before and during the loop, not after.
+TDD is the red → green → refactor loop. This skill is the reference that makes that loop produce tests worth keeping: what a good test is, where tests go, the anti-patterns, and the rules of the loop. Every section applies on every cycle — consult them before and during the loop, not after.
 
 Read `CONTEXT.md` and relevant linked documents before naming tests or interfaces. Respect applicable ADRs.
 
@@ -17,7 +17,7 @@ See [tests.md](tests.md) for examples and [mocking.md](mocking.md) for mocking g
 
 ## Seams — where tests go
 
-A **seam** is the public boundary you test at: the interface where you observe behavior without reaching inside. Tests live at seams, never against internals.
+A **seam** is where a module's interface lives and behavior can be varied without editing the caller. Before testing, identify the module under test. Exercise it through its interface and do not reach into its implementation. A seam may be internal to a larger module while remaining the external test surface of the smaller module that owns it.
 
 **Test only at pre-agreed seams.** Before writing any test, write down the seams under test and confirm them with the user. No test is written at an unconfirmed seam. You can't test everything — agreeing the seams up front is how testing effort lands on the critical paths and complex logic instead of every edge case.
 
@@ -33,4 +33,5 @@ Ask: "What's the public interface, and which seams should we test?"
 
 - **Red before green.** Write the failing test first, then only enough code to pass it. Don't anticipate future tests or add speculative features.
 - **One slice at a time.** One seam, one test, one minimal implementation per cycle.
-- **Refactoring is not part of the loop.** It belongs to the review stage (see the `code-review` skill), not the red → green implementation cycle.
+- **Test retained behavior, not historical absence.** When removing a feature, delete or revise tests that specified the retired behavior. Do not add a test whose only contract is that the removed feature stays absent. Add negative coverage only when absence is itself a durable requirement, such as a safety, security, compatibility, or explicit business invariant. If no retained behavior changes and no such invariant exists, removal does not require a replacement test.
+- **Refactor after green when the completed slice exposes duplication, poor names, or unnecessary structure.** Keep behavior unchanged, rerun the focused test after each refactor, and do not anticipate abstractions needed only by future slices.
