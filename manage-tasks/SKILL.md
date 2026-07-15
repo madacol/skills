@@ -13,7 +13,7 @@ Use task tracking as durable working memory, not as a vague reminder list. The i
 
 1. Keep the task index brief and scannable. Track only pending, active, and blocked work there.
 2. Create or update a task file for any non-trivial task, any ambiguous task, or any task with useful context, evidence, decisions, constraints, blockers, or acceptance criteria.
-3. Write the task file in precise, agent-chosen language. Treat user wording as evidence, not authoritative terminology. Infer the intended subject from nearby context.
+3. Write the task file precisely. Treat user wording as evidence, not authoritative terminology. Infer the intended subject from nearby context.
 4. If the subject or owner layer is ambiguous, record the ambiguity and plausible interpretations. Do not implement behavior-changing work until the ambiguity is resolved by evidence or clarification.
 5. Preserve high-signal evidence in the task file or linked evidence files. Evidence may be short or long; include whatever materially helps future work, but organize it so the task brief remains usable.
 6. Keep task state synchronized: when a task is active, blocked, pending, or complete, update the index and task file together.
