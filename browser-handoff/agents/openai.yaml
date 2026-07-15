@@ -1,0 +1,4 @@
+interface:
+  display_name: "Browser Handoff"
+  short_description: "Token URL for user browser control"
+  default_prompt: "Use $browser-handoff to open this site and send me a private control URL when manual input is needed."
