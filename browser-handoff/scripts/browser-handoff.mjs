@@ -1273,7 +1273,7 @@ function vncControlHtml(options) {
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=0.5, maximum-scale=5, user-scalable=yes">
   <title>Browser Handoff VNC</title>
   <style>
     :root {
@@ -1289,13 +1289,31 @@ function vncControlHtml(options) {
 
     body {
       margin: 0;
+      min-width: 100vw;
+      min-height: 100vh;
+      min-height: 100dvh;
+      background: #0f1419;
+      overflow: auto;
+      touch-action: pan-x pan-y pinch-zoom;
+    }
+
+    .zoom-surface {
+      position: relative;
+      width: 100vw;
+      min-height: 100vh;
+      min-height: 100dvh;
+    }
+
+    .stage {
       width: 100vw;
       height: 100vh;
       height: 100dvh;
       display: grid;
-      grid-template-rows: auto minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr) auto;
       background: #0f1419;
-      overflow: hidden;
+      overflow: clip;
+      transform-origin: 0 0;
+      will-change: transform;
     }
 
     .toolbar {
@@ -1307,6 +1325,7 @@ function vncControlHtml(options) {
       background: #17212a;
       flex-wrap: wrap;
       min-width: 0;
+      touch-action: pan-x pan-y pinch-zoom;
     }
 
     button, a {
@@ -1339,6 +1358,17 @@ function vncControlHtml(options) {
       color: #9fb0bc;
     }
 
+    .zoom-status {
+      font-size: 12px;
+      color: #c4d3df;
+    }
+
+    .remote-frame-wrap {
+      min-width: 0;
+      min-height: 0;
+      background: #050708;
+    }
+
     iframe {
       width: 100%;
       height: 100%;
@@ -1347,6 +1377,21 @@ function vncControlHtml(options) {
       border: 0;
       background: #050708;
       display: block;
+    }
+
+    .local-zoom-zone {
+      touch-action: pan-x pan-y pinch-zoom;
+    }
+
+    .zoom-hint {
+      padding: 5px 8px;
+      border-top: 1px solid #273440;
+      background: #101820;
+      color: #9fb0bc;
+      font-size: 11px;
+      line-height: 1.3;
+      text-align: center;
+      user-select: none;
     }
 
     @media (max-width: 700px) {
@@ -1366,26 +1411,135 @@ function vncControlHtml(options) {
         flex-basis: 100%;
         margin-left: 0;
       }
+
+      .zoom-hint {
+        font-size: 10px;
+        padding: 4px 6px;
+      }
     }
   </style>
 </head>
 <body>
-  <div class="toolbar">
-    <button id="continueSave" type="button">Continue & Save</button>
-    <button id="saveLater" type="button">Save for Later</button>
-    <button id="cancel" type="button">Cancel</button>
-    <button id="stop" type="button">Stop</button>
-    <a href="${iframeSrc}" target="_blank" rel="noopener noreferrer">Full Screen noVNC</a>
-    <div id="status" class="status">Connected</div>
+  <div id="zoomSurface" class="zoom-surface">
+    <main id="stage" class="stage">
+      <div class="toolbar local-zoom-zone">
+        <button id="continueSave" type="button">Continue & Save</button>
+        <button id="saveLater" type="button">Save for Later</button>
+        <button id="cancel" type="button">Cancel</button>
+        <button id="stop" type="button">Stop</button>
+        <a href="${iframeSrc}" target="_blank" rel="noopener noreferrer">Full Screen noVNC</a>
+        <span id="zoomStatus" class="zoom-status">Page zoom 100%</span>
+        <div id="status" class="status">Connected</div>
+      </div>
+      <div class="remote-frame-wrap">
+        <iframe src="${iframeSrc}" title="Remote browser" allow="fullscreen"></iframe>
+      </div>
+      <div class="zoom-hint local-zoom-zone">Pinch here or on the toolbar to zoom the whole handoff page. Pinch inside the remote desktop still goes to the remote browser.</div>
+    </main>
   </div>
-  <iframe src="${iframeSrc}" title="Remote browser" allow="fullscreen"></iframe>
   <script>
     const token = ${JSON.stringify(options.token)};
+    const zoomSurface = document.getElementById("zoomSurface");
+    const stage = document.getElementById("stage");
     const statusEl = document.getElementById("status");
+    const zoomStatusEl = document.getElementById("zoomStatus");
     const continueSaveButton = document.getElementById("continueSave");
     const saveLaterButton = document.getElementById("saveLater");
     const cancelButton = document.getElementById("cancel");
     const stopButton = document.getElementById("stop");
+    const minPageZoom = 0.75;
+    const maxPageZoom = 4;
+    let pageZoom = 1;
+    let localPinch = null;
+
+    function clampZoom(value) {
+      return Math.min(maxPageZoom, Math.max(minPageZoom, value));
+    }
+
+    function viewportSize() {
+      return {
+        width: window.innerWidth || document.documentElement.clientWidth || 1,
+        height: window.innerHeight || document.documentElement.clientHeight || 1
+      };
+    }
+
+    function applyPageZoom(nextZoom) {
+      pageZoom = clampZoom(nextZoom);
+      const size = viewportSize();
+      stage.style.width = size.width + "px";
+      stage.style.height = size.height + "px";
+      stage.style.transform = "scale(" + pageZoom + ")";
+      zoomSurface.style.width = Math.ceil(size.width * pageZoom) + "px";
+      zoomSurface.style.height = Math.ceil(size.height * pageZoom) + "px";
+      zoomStatusEl.textContent = "Page zoom " + Math.round(pageZoom * 100) + "%";
+    }
+
+    function touchDistance(touches) {
+      const dx = touches[0].clientX - touches[1].clientX;
+      const dy = touches[0].clientY - touches[1].clientY;
+      return Math.hypot(dx, dy);
+    }
+
+    function touchMidpoint(touches) {
+      return {
+        x: (touches[0].clientX + touches[1].clientX) / 2,
+        y: (touches[0].clientY + touches[1].clientY) / 2
+      };
+    }
+
+    function isLocalZoomTarget(target) {
+      if (!(target instanceof Element)) {
+        return false;
+      }
+
+      return Boolean(target.closest(".local-zoom-zone")) && !target.closest(".remote-frame-wrap");
+    }
+
+    function startLocalPinch(event) {
+      if (event.touches.length !== 2 || !isLocalZoomTarget(event.target)) {
+        return;
+      }
+
+      const midpoint = touchMidpoint(event.touches);
+      localPinch = {
+        distance: touchDistance(event.touches),
+        zoom: pageZoom,
+        midpoint,
+        pagePoint: {
+          x: (window.scrollX + midpoint.x) / pageZoom,
+          y: (window.scrollY + midpoint.y) / pageZoom
+        }
+      };
+    }
+
+    function moveLocalPinch(event) {
+      if (!localPinch || event.touches.length !== 2) {
+        return;
+      }
+
+      event.preventDefault();
+      const midpoint = touchMidpoint(event.touches);
+      const distance = touchDistance(event.touches);
+      const nextZoom = localPinch.zoom * (distance / localPinch.distance);
+      applyPageZoom(nextZoom);
+      window.scrollTo(
+        Math.max(0, (localPinch.pagePoint.x * pageZoom) - midpoint.x),
+        Math.max(0, (localPinch.pagePoint.y * pageZoom) - midpoint.y)
+      );
+    }
+
+    function endLocalPinch(event) {
+      if (event.touches.length < 2) {
+        localPinch = null;
+      }
+    }
+
+    window.addEventListener("resize", () => applyPageZoom(pageZoom));
+    document.addEventListener("touchstart", startLocalPinch, { passive: true });
+    document.addEventListener("touchmove", moveLocalPinch, { passive: false });
+    document.addEventListener("touchend", endLocalPinch, { passive: true });
+    document.addEventListener("touchcancel", endLocalPinch, { passive: true });
+    applyPageZoom(1);
 
     async function postJson(path, payload = {}) {
       const response = await fetch(path + "?token=" + encodeURIComponent(token), {

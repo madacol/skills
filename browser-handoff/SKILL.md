@@ -16,7 +16,7 @@ node /home/mada/.agents/skills/browser-handoff/scripts/browser-handoff.mjs "http
 Default behavior:
 
 - Uses a desktop Chromium session exposed through VNC/noVNC.
-- The embedded noVNC view uses local scaling so the remote desktop fits phone screens; if the embedded view is still constrained by browser chrome, tell the user to tap `Full Screen noVNC`.
+- The embedded noVNC view uses local scaling so the remote desktop fits phone screens. Pinch inside noVNC is passed to the remote browser; pinch on the toolbar or bottom zoom strip changes the local handoff-page zoom for the whole interface.
 - Deploys a private token URL and prints only the user-facing `Control URL`.
 - Stops the previously active handoff before creating a new default handoff.
 - Self-closes after 30 minutes unless `--ttl-minutes` changes the TTL.
