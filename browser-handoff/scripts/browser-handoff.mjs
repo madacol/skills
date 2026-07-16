@@ -2,6 +2,7 @@
 import crypto from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -14,6 +15,7 @@ import { promisify } from "node:util";
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
 const DEFAULT_TTL_MINUTES = 30;
 const DEFAULT_STALE_CHROMIUM_GRACE_MINUTES = 60;
+const DEFAULTS_FILE_NAME = "defaults.json";
 const PROFILE_MARKER_FILE = ".browser-handoff-profile.json";
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 const OUTCOMES = new Set(["continue", "save_later", "cancel"]);
@@ -82,20 +84,20 @@ Default:
   Deploy a token-protected control page and print the user-facing Control URL.
 
 Options:
-  --subdomain <name>            Deployed subdomain. Default: browser-handoff-<random>
+  --subdomain <name>            Deployed subdomain. Default: workspace cached value or browser-handoff-<random>
   --local                       Run only a local server for debugging
   --serve                       Internal service mode used by deployment
   --host <host>                 Bind host in --local/--serve. Default: 127.0.0.1
   --port <port>                 Bind port in --local/--serve. Default: PORT or 8787
   --token <token>               Control-page bearer token. Default: random
-  --ttl-minutes <n>             Auto-close timeout. Default: 30. Use 0 to disable
+  --ttl-minutes <n>             Auto-close timeout. Default: 30. Use 0 to disable; overrides are not cached
   --expires-at <iso>            Absolute expiration time, used internally by deployed services
   --active-state <path>         Active-session record. Default: <artifacts-parent>/browser-handoff-active.json
   --keep-previous               Do not stop the previous handoff; use distinct artifacts and local port
   --control <vnc>               Control backend. Default: vnc
   --artifacts-dir <path>        Artifact root. Default: ./artifacts/browser-handoff
-  --profile-dir <path>          Persistent Chromium profile. Default: <artifacts-dir>/profile
-  --storage-state <path>        Storage-state output. Default: <artifacts-dir>/storage-state.json
+  --profile-dir <path>          Persistent Chromium profile. Default: workspace cached value or <artifacts-dir>/profile
+  --storage-state <path>        Storage-state output. Default: workspace cached value or <artifacts-dir>/storage-state.json
   --headless <0|1>              Browser headless flag. VNC forces non-headless. Default: 0
   --browser-path <path>         Chromium executable. Default: BROWSER_PATH, /usr/bin/chromium, or Playwright managed
   --device <name>               Playwright device profile, e.g. "iPhone 14" or "Pixel 7"
@@ -288,6 +290,36 @@ function defaultVncPort() {
   return 5900 + crypto.randomInt(100);
 }
 
+function readWorkspaceDefaults(artifactsDir) {
+  const defaultsPath = path.join(artifactsDir, DEFAULTS_FILE_NAME);
+
+  try {
+    return JSON.parse(fsSync.readFileSync(defaultsPath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+async function writeWorkspaceDefaults(options) {
+  if (options.mode === "serve" || options.keepPrevious) {
+    return;
+  }
+
+  const defaultsPath = path.join(options.artifactsDir, DEFAULTS_FILE_NAME);
+  const defaults = {
+    subdomain: options.subdomain,
+    profileDir: options.profileDir,
+    storageStatePath: options.storageStatePath
+  };
+
+  await fs.mkdir(options.artifactsDir, { recursive: true, mode: 0o700 });
+  await writePrivateRecord(defaultsPath, defaults);
+}
+
+function defaultString(value) {
+  return typeof value === "string" && value ? value : "";
+}
+
 function parseArgs(argv) {
   const args = [...argv];
 
@@ -353,16 +385,19 @@ function parseArgs(argv) {
       || process.env.BROWSER_HANDOFF_ARTIFACTS_DIR
       || path.join(process.cwd(), "artifacts", "browser-handoff")
   );
+  const workspaceDefaults = readWorkspaceDefaults(artifactsDir);
   const timestamp = new Date().toISOString().replaceAll(":", "-");
   const runDir = path.join(artifactsDir, "runs", timestamp);
   const profileDir = path.resolve(
     flags.get("profile-dir")
       || process.env.BROWSER_HANDOFF_PROFILE_DIR
+      || defaultString(workspaceDefaults.profileDir)
       || path.join(artifactsDir, "profile")
   );
   const storageStatePath = path.resolve(
     flags.get("storage-state")
       || process.env.BROWSER_HANDOFF_STORAGE_STATE
+      || defaultString(workspaceDefaults.storageStatePath)
       || path.join(artifactsDir, "storage-state.json")
   );
   const activeStatePath = path.resolve(
@@ -422,7 +457,7 @@ function parseArgs(argv) {
     allowExternalHost,
     slowMo: Number.parseInt(flags.get("slow-mo") || process.env.BROWSER_HANDOFF_SLOW_MO || "50", 10),
     mode,
-    subdomain: flags.get("subdomain") || process.env.BROWSER_HANDOFF_SUBDOMAIN || defaultSubdomain(),
+    subdomain: flags.get("subdomain") || process.env.BROWSER_HANDOFF_SUBDOMAIN || defaultString(workspaceDefaults.subdomain) || defaultSubdomain(),
     siteManager: flags.get("site-manager") || process.env.BROWSER_HANDOFF_SITE_MANAGER || "site-manager",
     nodePath: flags.get("node") || process.execPath,
     scriptPath: fileURLToPath(import.meta.url),
@@ -3022,6 +3057,7 @@ async function main() {
     try {
       const controlUrl = await deployControlUrl(options);
       await writeActiveSessionRecord(options, controlUrl, "running");
+      await writeWorkspaceDefaults(options);
     } catch (error) {
       await clearActiveSessionIfCurrent(options);
       throw error;
@@ -3034,6 +3070,7 @@ async function main() {
     await stopPreviousActiveSession(options);
     await cleanupStaleChromiumForProfile(options);
     await writeActiveSessionRecord(options, "", "starting");
+    await writeWorkspaceDefaults(options);
   }
 
   await runBrowserServer(options);

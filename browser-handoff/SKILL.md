@@ -5,13 +5,15 @@ description: Open a live website in a controllable browser and send the user a p
 
 # Browser Handoff
 
-Use the bundled helper when a browsing task reaches a step that is easier or safer with the user directly controlling the live browser. The browser session is the thing being handed off: control changes hands, but the session remains the same session.
-
-For high-sensitivity sites such as government identity portals, tax portals, banking, healthcare, immigration, or any flow involving identity credentials, documents, payments, or other sensitive personal data, do not create a browser handoff until the user has explicitly approved the risk that the session is controlled through a private token URL on an external deployment domain. If that approval is not available or the request is blocked, guide the user through their own browser instead.
+Use the bundled helper when a browsing task reaches a step that is easier or safer with the user directly controlling the live browser. The normal command is only the target URL:
 
 ```bash
 node /home/mada/.agents/skills/browser-handoff/scripts/browser-handoff.mjs "https://example.com"
 ```
+
+The helper owns the operational defaults: deployed token URL, VNC/noVNC, 30-minute TTL, workspace artifacts/profile/storage, stable cached subdomain, runtime preflight, stale Chromium cleanup, and active-session records. Do not pass extra flags during normal use.
+
+For high-sensitivity sites such as government identity portals, tax portals, banking, healthcare, immigration, or any flow involving identity credentials, documents, payments, or other sensitive personal data, do not create a browser handoff until the user has explicitly approved the risk that the session is controlled through a private token URL on an external deployment domain. If that approval is not available or the request is blocked, guide the user through their own browser instead.
 
 Default behavior:
 
@@ -20,7 +22,7 @@ Default behavior:
 - Deploys a private token URL and prints only the user-facing `Control URL`.
 - Stops the previously active handoff before creating a new default handoff.
 - Self-closes after 30 minutes unless `--ttl-minutes` changes the TTL.
-- Persists browser state under `artifacts/browser-handoff/profile`.
+- Persists browser state under the workspace `artifacts/browser-handoff` defaults and reuses stable workspace defaults on future runs.
 
 For a mobile site or mobile verification flow, use a Playwright device profile:
 
@@ -28,7 +30,7 @@ For a mobile site or mobile verification flow, use a Playwright device profile:
 node /home/mada/.agents/skills/browser-handoff/scripts/browser-handoff.mjs "https://example.com" --device "iPhone 14"
 ```
 
-Send the printed `Control URL` to the user. Say what page is open, what they need to do, and what you will do after they click Continue. Then end the turn.
+Send the printed `Control URL` to the user only after verifying it. Say what page is open, what they need to do, and what you will do after they click Continue. Then end the turn.
 
 The helper must not print a `Control URL` unless local preflight confirms the runtime dependencies needed by the deployed service, including Playwright and a usable Chromium executable. If the helper fails before printing the URL, report the concrete preflight error instead of retrying blindly. A missing `latest.json` before the user clicks Continue/Save is normal; it is not evidence by itself that deployment failed.
 
@@ -60,12 +62,15 @@ Treat the user’s continue signal as a control boundary, not proof that the web
 - The default TTL is enforced by the running handoff process itself; no cron or at-job is required.
 - If the live session is lost, treat any restored profile as reduced continuity rather than the exact same session.
 
-## Options
+## Advanced flags
 
-- `--subdomain <name>`: stable deployed subdomain. Defaults to a unique `browser-handoff-*` name.
+Use flags only when the user asks for non-default behavior or the helper reports a concrete failure that requires an override.
+
+- `--ttl-minutes <n>`: auto-close timeout. Defaults to `30`; use `0` to disable. TTL overrides are not remembered as workspace defaults.
+- `--subdomain <name>`: stable deployed subdomain. Defaults to the workspace cached subdomain after the first successful run, otherwise a unique `browser-handoff-*` name.
 - `--artifacts-dir <path>`: artifact root. Defaults to `./artifacts/browser-handoff`.
-- `--profile-dir <path>`: browser profile directory. Defaults to `<artifacts-dir>/profile`.
-- `--ttl-minutes <n>`: auto-close timeout. Defaults to `30`; use `0` to disable.
+- `--profile-dir <path>`: browser profile directory. Defaults to the workspace cached profile path, otherwise `<artifacts-dir>/profile`.
+- `--storage-state <path>`: storage-state output. Defaults to the workspace cached storage path, otherwise `<artifacts-dir>/storage-state.json`.
 - `--keep-previous`: create a handoff without replacing the previous active handoff. Concurrent handoffs must use distinct `--artifacts-dir` values; concurrent local handoffs also need distinct `--port` values.
 - `--device <name>`: Playwright device profile, such as `iPhone 14` or `Pixel 7`; sets mobile viewport, user agent, touch support, and device scale.
 - `--user-agent <value>`, `--is-mobile <0|1>`, `--has-touch <0|1>`, `--device-scale-factor <n>`: explicit browser emulation overrides.

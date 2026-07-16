@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 
 const scriptPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "browser-handoff.mjs");
+const defaultsFile = "defaults.json";
 const profileMarkerFile = ".browser-handoff-profile.json";
 
 function run(...args) {
@@ -213,6 +214,53 @@ test("resume reports a missing active session before loading Playwright", () => 
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /No active browser handoff/);
+});
+
+test("startup uses workspace defaults without persisting a TTL override", (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-handoff-defaults-"));
+  const artifactsDir = path.join(tmpDir, "artifacts");
+  const profileDir = path.join(tmpDir, "profile-from-defaults");
+  const storageStatePath = path.join(tmpDir, "storage-from-defaults.json");
+  const activeStatePath = path.join(tmpDir, "browser-handoff-active.json");
+
+  t.after(() => {
+    fs.rmSync(tmpDir, { force: true, recursive: true });
+  });
+
+  fs.mkdirSync(artifactsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(artifactsDir, defaultsFile),
+    `${JSON.stringify({
+      subdomain: "cached-browser-handoff",
+      profileDir,
+      storageStatePath,
+      ttlMinutes: 90
+    }, null, 2)}\n`
+  );
+
+  const result = runWithEnv(
+    { BROWSER_HANDOFF_ARTIFACTS_DIR: artifactsDir },
+    "http://example.invalid",
+    "--local",
+    "--xvfb",
+    "/bin/false",
+    "--x11vnc",
+    "/bin/false",
+    "--novnc-web",
+    path.join(tmpDir, "missing-novnc")
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /VNC control requires missing runtime components/);
+
+  const record = JSON.parse(fs.readFileSync(activeStatePath, "utf8"));
+  const createdAt = Date.parse(record.createdAt);
+  const expiresAt = Date.parse(record.expiresAt);
+
+  assert.equal(record.profileDir, profileDir);
+  assert.equal(record.storageStatePath, storageStatePath);
+  assert.ok(expiresAt - createdAt > 29 * 60_000);
+  assert.ok(expiresAt - createdAt < 31 * 60_000);
 });
 
 test("startup cleanup terminates a stale Chromium process for the same profile", async (t) => {
