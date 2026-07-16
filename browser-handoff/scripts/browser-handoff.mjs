@@ -32,8 +32,10 @@ const execFileAsync = promisify(execFile);
  * host: string,
  * port: number,
  * token: string,
+ * cdpEndpoint: string,
  * activeId: string,
  * activeStatePath: string,
+ * continuationStatePath: string,
  * keepPrevious: boolean,
  * ttlMinutes: number,
  * ttlMs: number,
@@ -85,7 +87,7 @@ Options:
   --ttl-minutes <n>             Auto-close timeout. Default: 30. Use 0 to disable
   --expires-at <iso>            Absolute expiration time, used internally by deployed services
   --active-state <path>         Active-session record. Default: <artifacts-parent>/browser-handoff-active.json
-  --keep-previous               Do not stop the previously active handoff before creating this one
+  --keep-previous               Do not stop the previous handoff; use distinct artifacts and local port
   --control <vnc>               Control backend. Default: vnc
   --artifacts-dir <path>        Artifact root. Default: ./artifacts/browser-handoff
   --profile-dir <path>          Persistent Chromium profile. Default: <artifacts-dir>/profile
@@ -123,6 +125,20 @@ Environment mirrors:
   BROWSER_HANDOFF_XVFB, BROWSER_HANDOFF_X11VNC, BROWSER_HANDOFF_NOVNC_WEB,
   BROWSER_HANDOFF_VNC_DISPLAY, BROWSER_HANDOFF_VNC_PORT,
   BROWSER_PATH, PORT
+`;
+}
+
+function resumeUsage() {
+  return `Usage:
+  browser-handoff.mjs resume inspect [--active-state <path>]
+  browser-handoff.mjs resume goto <url> [--active-state <path>]
+  browser-handoff.mjs resume click <selector> [--active-state <path>]
+  browser-handoff.mjs resume fill <selector> <text> [--active-state <path>]
+  browser-handoff.mjs resume press <selector> <key> [--active-state <path>]
+  browser-handoff.mjs resume screenshot [path] [--active-state <path>]
+
+Connects to the Chromium process recorded by the active browser handoff and
+performs one agent action without closing the live browser.
 `;
 }
 
@@ -266,7 +282,7 @@ function parseArgs(argv) {
 
   let targetUrl = "";
   const flags = new Map();
-  const booleans = new Set(["allow-external-host", "local", "serve", "trust-proxy-token"]);
+  const booleans = new Set(["allow-external-host", "keep-previous", "local", "serve", "trust-proxy-token"]);
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -338,6 +354,8 @@ function parseArgs(argv) {
       || process.env.BROWSER_HANDOFF_ACTIVE_STATE
       || path.join(path.dirname(artifactsDir), "browser-handoff-active.json")
   );
+  const activeId = flags.get("active-id") || process.env.BROWSER_HANDOFF_ACTIVE_ID || defaultActiveId();
+  const continuationId = crypto.createHash("sha256").update(activeId).digest("hex");
   const ttlMinutes = parseNonNegativeNumber(
     flags.get("ttl-minutes") || process.env.BROWSER_HANDOFF_TTL_MINUTES || String(DEFAULT_TTL_MINUTES),
     "TTL minutes"
@@ -359,8 +377,10 @@ function parseArgs(argv) {
     host,
     port: parsePort(flags.get("port") || process.env.BROWSER_HANDOFF_PORT || process.env.PORT || "8787"),
     token: flags.get("token") || process.env.BROWSER_HANDOFF_TOKEN || crypto.randomBytes(18).toString("hex"),
-    activeId: flags.get("active-id") || process.env.BROWSER_HANDOFF_ACTIVE_ID || defaultActiveId(),
+    cdpEndpoint: "",
+    activeId,
     activeStatePath,
+    continuationStatePath: path.join(artifactsDir, "sessions", `${continuationId}.json`),
     keepPrevious: flags.has("keep-previous") || parseBoolean(process.env.BROWSER_HANDOFF_KEEP_PREVIOUS, false),
     ttlMinutes,
     ttlMs: Math.round(ttlMinutes * 60_000),
@@ -399,6 +419,65 @@ function parseArgs(argv) {
   };
 }
 
+function parseResumeArgs(argv) {
+  const args = [...argv];
+
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(resumeUsage());
+    process.exit(0);
+  }
+
+  const action = args.shift() || "inspect";
+  const positional = [];
+  let activeStatePath = process.env.BROWSER_HANDOFF_ACTIVE_STATE || path.resolve(
+    process.cwd(),
+    "artifacts",
+    "browser-handoff-active.json"
+  );
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--active-state") {
+      const value = args[index + 1];
+
+      if (!value || value.startsWith("--")) {
+        fail("Missing value for --active-state");
+      }
+
+      activeStatePath = path.resolve(value);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--")) {
+      fail(`Unsupported resume option: ${arg}`);
+    }
+
+    positional.push(arg);
+  }
+
+  const argumentCounts = new Map([
+    ["inspect", [0, 0]],
+    ["goto", [1, 1]],
+    ["click", [1, 1]],
+    ["fill", [2, 2]],
+    ["press", [2, 2]],
+    ["screenshot", [0, 1]]
+  ]);
+  const bounds = argumentCounts.get(action);
+
+  if (!bounds) {
+    fail(`Unsupported resume action: ${action}\n\n${resumeUsage()}`);
+  }
+
+  if (positional.length < bounds[0] || positional.length > bounds[1]) {
+    fail(`Invalid arguments for resume ${action}.\n\n${resumeUsage()}`);
+  }
+
+  return { action, positional, activeStatePath };
+}
+
 async function pathExists(filePath) {
   try {
     await fs.access(filePath);
@@ -430,6 +509,30 @@ async function loadPlaywright() {
   throw new Error(
     `Missing dependency: playwright.\nInstall a pinned version in the current workspace, for example:\n  pnpm add -D playwright@1.60.0\n\n${errors.join("\n")}`
   );
+}
+
+async function waitForCdpEndpoint(profileDir, timeoutMs = 8_000) {
+  const activePortPath = path.join(profileDir, "DevToolsActivePort");
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "";
+
+  while (Date.now() < deadline) {
+    try {
+      const [port] = (await fs.readFile(activePortPath, "utf8")).trim().split(/\r?\n/);
+
+      if (/^\d+$/.test(port)) {
+        return `http://127.0.0.1:${port}`;
+      }
+
+      lastError = `Invalid DevToolsActivePort contents: ${port}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error(`Chromium CDP endpoint did not become ready. ${lastError}`);
 }
 
 async function resolveBrowserPath(explicitPath) {
@@ -639,11 +742,102 @@ async function readActiveSessionRecord(activeStatePath) {
   }
 }
 
-async function writeActiveSessionRecord(options, controlUrl = "", status = "running") {
-  if (options.keepPrevious) {
-    return;
-  }
+async function withRecordLock(recordPath, callback, timeoutMs = 5_000) {
+  const lockPath = `${recordPath}.lock`;
+  await fs.mkdir(path.dirname(recordPath), { recursive: true, mode: 0o700 });
+  const lockProcess = spawn("flock", [
+    "-x",
+    "-w",
+    String(Math.max(1, Math.ceil(timeoutMs / 1_000))),
+    lockPath,
+    "sh",
+    "-c",
+    "printf 'locked\\n'; IFS= read -r _"
+  ], { stdio: ["pipe", "pipe", "pipe"] });
+  let stderr = "";
+  lockProcess.stderr.setEncoding("utf8");
+  lockProcess.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
 
+  await new Promise((resolve, reject) => {
+    let stdout = "";
+
+    lockProcess.once("error", reject);
+    lockProcess.once("exit", (code) => {
+      reject(new Error(
+        code === 1
+          ? `Timed out waiting for active-session record lock ${lockPath}.`
+          : `Failed to acquire active-session record lock ${lockPath}: ${stderr.trim() || `exit ${code}`}`
+      ));
+    });
+    lockProcess.stdout.setEncoding("utf8");
+    lockProcess.stdout.on("data", (chunk) => {
+      stdout += chunk;
+
+      if (stdout.includes("\n")) {
+        resolve();
+      }
+    });
+  });
+
+  await fs.chmod(lockPath, 0o600);
+
+  try {
+    return await callback();
+  } finally {
+    lockProcess.stdin.end("\n");
+    await new Promise((resolve) => lockProcess.once("exit", resolve));
+  }
+}
+
+async function writePrivateRecord(recordPath, value) {
+  const temporaryPath = `${recordPath}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+
+  await fs.writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+    flag: "wx"
+  });
+  await fs.chmod(temporaryPath, 0o600);
+  await fs.rename(temporaryPath, recordPath);
+  await fs.chmod(recordPath, 0o600);
+}
+
+async function replaceSessionRecord(recordPath, options, record) {
+  await withRecordLock(recordPath, async () => {
+    const existing = await readActiveSessionRecord(recordPath).catch(() => undefined);
+    const sameSession = existing?.activeId === options.activeId;
+
+    if (sameSession && existing.status === "stopped" && record.status !== "stopped") {
+      throw new Error(`Browser handoff ${options.activeId} stopped before its session record was published.`);
+    }
+
+    await writePrivateRecord(recordPath, {
+      ...record,
+      createdAt: sameSession ? existing.createdAt || record.createdAt : record.createdAt,
+      cdpEndpoint: options.cdpEndpoint || (sameSession ? existing.cdpEndpoint : "") || ""
+    });
+  });
+}
+
+async function patchSessionRecord(recordPath, options, patch) {
+  await withRecordLock(recordPath, async () => {
+    const record = await readActiveSessionRecord(recordPath);
+
+    if (!record || record.activeId !== options.activeId) {
+      throw new Error("Active browser handoff changed before its CDP endpoint was recorded.");
+    }
+
+    if (record.status === "stopped") {
+      throw new Error(`Browser handoff ${options.activeId} has already stopped.`);
+    }
+
+    await writePrivateRecord(recordPath, { ...record, ...patch });
+  });
+}
+
+async function writeActiveSessionRecord(options, controlUrl = "", status = "running") {
   const record = {
     activeId: options.activeId,
     status,
@@ -657,23 +851,48 @@ async function writeActiveSessionRecord(options, controlUrl = "", status = "runn
     profileDir: options.profileDir,
     storageStatePath: options.storageStatePath,
     controlMode: options.controlMode,
+    cdpEndpoint: options.cdpEndpoint || "",
     deviceName: options.deviceName || undefined,
     viewport: options.viewport
   };
 
-  await fs.mkdir(path.dirname(options.activeStatePath), { recursive: true });
-  await fs.writeFile(options.activeStatePath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+  await replaceSessionRecord(options.continuationStatePath, options, record);
+
+  if (!options.keepPrevious) {
+    await replaceSessionRecord(options.activeStatePath, options, record);
+  }
+}
+
+async function patchActiveSessionRecord(options, patch) {
+  await patchSessionRecord(options.continuationStatePath, options, patch);
+
+  if (!options.keepPrevious) {
+    await patchSessionRecord(options.activeStatePath, options, patch);
+  }
 }
 
 async function clearActiveSessionIfCurrent(options) {
-  if (options.keepPrevious) {
-    return;
-  }
+  const markStopped = async (recordPath) => {
+    await withRecordLock(recordPath, async () => {
+      const record = await readActiveSessionRecord(recordPath).catch(() => undefined);
 
-  const record = await readActiveSessionRecord(options.activeStatePath).catch(() => undefined);
+      if (record?.activeId === options.activeId) {
+        await writePrivateRecord(recordPath, {
+          ...record,
+          status: "stopped",
+          stoppedAt: new Date().toISOString(),
+          controlUrl: "",
+          stopUrl: "",
+          cdpEndpoint: ""
+        });
+      }
+    });
+  };
 
-  if (record?.activeId === options.activeId) {
-    await fs.rm(options.activeStatePath, { force: true });
+  await markStopped(options.continuationStatePath);
+
+  if (!options.keepPrevious) {
+    await markStopped(options.activeStatePath);
   }
 }
 
@@ -859,7 +1078,9 @@ async function saveCurrentSession(state, outcomeInput = "continue") {
     savedAt: new Date().toISOString(),
     outcome,
     continuity: "live_session",
-    controlState: outcome === "continue" ? "agent_resumed" : outcome === "save_later" ? "suspended" : "canceled",
+    controlState: outcome === "continue" ? "ready_for_agent" : outcome === "save_later" ? "suspended" : "canceled",
+    activeId: state.options.activeId,
+    activeStatePath: state.options.continuationStatePath,
     currentUrl: page.url(),
     runDir: state.options.runDir,
     profileDir: state.options.profileDir,
@@ -873,6 +1094,97 @@ async function saveCurrentSession(state, outcomeInput = "continue") {
   await fs.writeFile(state.options.latestJsonPath, `${JSON.stringify(state.lastSave, null, 2)}\n`, "utf8");
 
   return state.lastSave;
+}
+
+async function connectToActiveBrowser(activeStatePath) {
+  const record = await readActiveSessionRecord(activeStatePath);
+
+  if (!record) {
+    throw new Error(`No active browser handoff found at ${activeStatePath}.`);
+  }
+
+  if (!record.cdpEndpoint) {
+    throw new Error(`Active browser handoff ${record.activeId || ""} has no agent continuation endpoint.`);
+  }
+
+  const playwright = await loadPlaywright();
+  const browser = await playwright.chromium.connectOverCDP(record.cdpEndpoint);
+  const context = browser.contexts().at(-1);
+
+  if (!context) {
+    throw new Error("The active Chromium session has no browser context.");
+  }
+
+  const pages = context.pages().filter((page) => !page.isClosed());
+  const page = pages.filter((candidate) => candidate.url() !== "about:blank").at(-1) ?? pages.at(-1);
+
+  if (!page) {
+    throw new Error("The active Chromium session has no open page.");
+  }
+
+  return { browser, context, page, record };
+}
+
+async function inspectResumedPage(page) {
+  const text = await page.locator("body").innerText({ timeout: 10_000 }).catch(() => "");
+  const links = await page.locator("a").evaluateAll((anchors) =>
+    anchors.slice(0, 100).map((anchor) => ({
+      text: (anchor.textContent ?? "").trim().replace(/\s+/g, " "),
+      href: anchor.href
+    }))
+  ).catch(() => []);
+
+  return {
+    url: page.url(),
+    title: await page.title(),
+    text: text.slice(0, 20_000),
+    links
+  };
+}
+
+async function runResumeCommand(argv) {
+  const options = parseResumeArgs(argv);
+  const { page, record } = await connectToActiveBrowser(options.activeStatePath);
+  let result;
+
+  switch (options.action) {
+    case "inspect":
+      result = await inspectResumedPage(page);
+      break;
+    case "goto":
+      await page.goto(options.positional[0], { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await settlePage(page);
+      result = await inspectResumedPage(page);
+      break;
+    case "click":
+      await page.locator(options.positional[0]).first().click();
+      await settlePage(page);
+      result = await inspectResumedPage(page);
+      break;
+    case "fill":
+      await page.locator(options.positional[0]).first().fill(options.positional[1]);
+      result = await inspectResumedPage(page);
+      break;
+    case "press":
+      await page.locator(options.positional[0]).first().press(options.positional[1]);
+      await settlePage(page);
+      result = await inspectResumedPage(page);
+      break;
+    case "screenshot": {
+      const screenshotPath = path.resolve(
+        options.positional[0] || path.join(record.runDir || process.cwd(), "agent-resume.png")
+      );
+      await fs.mkdir(path.dirname(screenshotPath), { recursive: true });
+      await page.screenshot({ path: screenshotPath, fullPage: true, animations: "disabled" });
+      result = { ...(await inspectResumedPage(page)), screenshotPath };
+      break;
+    }
+    default:
+      throw new Error(`Unsupported resume action: ${options.action}`);
+  }
+
+  console.log(JSON.stringify({ activeId: record.activeId, action: options.action, ...result }, null, 2));
+  process.exit(0);
 }
 
 async function gotoUrl(state, destination) {
@@ -1514,6 +1826,12 @@ function buildBrowserOptions(playwright, options, executablePath) {
     browserOptions.hasTouch = options.hasTouch;
   }
 
+  browserOptions.args = [
+    ...(browserOptions.args ?? []),
+    "--remote-debugging-address=127.0.0.1",
+    "--remote-debugging-port=0"
+  ];
+
   return browserOptions;
 }
 
@@ -1630,7 +1948,10 @@ async function runVncBrowserServer(options) {
     await waitForTcpPort(options.vncPort);
 
     browserOptions.env = { ...process.env, DISPLAY: options.vncDisplay };
+    await fs.rm(path.join(options.profileDir, "DevToolsActivePort"), { force: true });
     context = await playwright.chromium.launchPersistentContext(options.profileDir, browserOptions);
+    options.cdpEndpoint = await waitForCdpEndpoint(options.profileDir);
+    await patchActiveSessionRecord(options, { cdpEndpoint: options.cdpEndpoint });
     const initialPage = getActivePage(context, undefined) ?? await context.newPage();
     const state = {
       options,
@@ -1688,6 +2009,7 @@ async function runVncBrowserServer(options) {
       console.log(`Expires: ${options.expiresAt || "disabled"}`);
       console.log(`VNC display: ${options.vncDisplay}`);
       console.log(`VNC port: ${options.vncPort}`);
+      console.log(`Agent continuation: ${options.cdpEndpoint}`);
       if (options.deviceName) {
         console.log(`Device: ${options.deviceName}`);
       } else if (options.viewportWasExplicit) {
@@ -1720,6 +2042,7 @@ async function runVncBrowserServer(options) {
       await stopChildProcess(child);
     }
 
+    await clearActiveSessionIfCurrent(options).catch(() => {});
     throw error;
   }
 }
@@ -1729,6 +2052,11 @@ async function runBrowserServer(options) {
 }
 
 async function main() {
+  if (process.argv[2] === "resume") {
+    await runResumeCommand(process.argv.slice(3));
+    return;
+  }
+
   const options = parseArgs(process.argv.slice(2));
   prepareLifecycleOptions(options);
 

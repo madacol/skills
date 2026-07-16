@@ -25,13 +25,20 @@ For a mobile site or mobile verification flow, use a Playwright device profile:
 node /home/mada/.agents/skills/browser-handoff/scripts/browser-handoff.mjs "https://example.com" --device "iPhone 14"
 ```
 
-Send the printed `Control URL` to the user. Say what page is open, what they need to do, and what you will do after they return control. Then end the turn.
+Send the printed `Control URL` to the user. Say what page is open, what they need to do, and what you will do after they click Continue. Then end the turn.
 
-Do not poll, sleep-loop, monitor, or keep the agent turn open while the user has control. Do not also drive the browser. Resume only after the user sends a follow-up message such as “continue”, asks for status, or gives new direction. At that point, read `artifacts/browser-handoff/latest.json` in the workspace that launched the helper.
+Do not poll, sleep-loop, monitor, or keep the agent turn open while the user has control. Resume only after the user sends a follow-up message such as “continue”, asks for status, or gives new direction. At that point, read `artifacts/browser-handoff/latest.json` in the workspace that launched the helper, then reconnect to the same live Chromium session through the active-state path it records:
+
+```bash
+node /home/mada/.agents/skills/browser-handoff/scripts/browser-handoff.mjs resume inspect \
+  --active-state <activeStatePath-from-latest.json>
+```
+
+Continue browsing with `resume goto <url>`, `resume click <selector>`, `resume fill <selector> <text>`, `resume press <selector> <key>`, and `resume screenshot [path]`. Every command reconnects to the same live browser and leaves it running.
 
 Outcomes:
 
-- `continue`: resume from the same browser state after verifying the page reflects the expected result.
+- `continue`: reconnect through the recorded active-state path, verify the page reflects the expected result, and continue from the same live browser state.
 - `save_later`: keep the session and stay paused.
 - `cancel`: stop the task unless the user gives new direction.
 
@@ -42,6 +49,7 @@ Treat the user’s continue signal as a control boundary, not proof that the web
 - The control UI supports VNC browser control, continue/save, save for later, cancel, and stop.
 - Saves write the selected outcome, screenshot, page HTML, current URL, visible links, storage state, and continuity metadata.
 - The active-session record lives beside the artifact root and lets a newer handoff invalidate an older one.
+- The active-session record contains a loopback-only CDP endpoint used by the `resume` commands; `latest.json` points the next agent to that record.
 - The default TTL is enforced by the running handoff process itself; no cron or at-job is required.
 - If the live session is lost, treat any restored profile as reduced continuity rather than the exact same session.
 
@@ -51,7 +59,7 @@ Treat the user’s continue signal as a control boundary, not proof that the web
 - `--artifacts-dir <path>`: artifact root. Defaults to `./artifacts/browser-handoff`.
 - `--profile-dir <path>`: browser profile directory. Defaults to `<artifacts-dir>/profile`.
 - `--ttl-minutes <n>`: auto-close timeout. Defaults to `30`; use `0` to disable.
-- `--keep-previous`: create a handoff without replacing the previous active handoff.
+- `--keep-previous`: create a handoff without replacing the previous active handoff. Concurrent handoffs must use distinct `--artifacts-dir` values; concurrent local handoffs also need distinct `--port` values.
 - `--device <name>`: Playwright device profile, such as `iPhone 14` or `Pixel 7`; sets mobile viewport, user agent, touch support, and device scale.
 - `--user-agent <value>`, `--is-mobile <0|1>`, `--has-touch <0|1>`, `--device-scale-factor <n>`: explicit browser emulation overrides.
 - `--viewport <width>x<height>`: desktop viewport override. Default: `1440x960`.
