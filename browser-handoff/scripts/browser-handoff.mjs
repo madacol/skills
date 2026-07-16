@@ -4,6 +4,7 @@ import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { createRequire } from "node:module";
@@ -516,9 +517,235 @@ async function pathExists(filePath) {
   }
 }
 
+async function readJsonFile(filePath) {
+  return JSON.parse(await fs.readFile(filePath, "utf8"));
+}
+
+async function safeReadDir(dirPath, options = {}) {
+  try {
+    return await fs.readdir(dirPath, options);
+  } catch {
+    return [];
+  }
+}
+
+function compareVersions(left, right) {
+  const leftParts = String(left || "0").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const rightParts = String(right || "0").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(leftParts.length, rightParts.length);
+
+  for (let index = 0; index < length; index += 1) {
+    const delta = (leftParts[index] || 0) - (rightParts[index] || 0);
+
+    if (delta !== 0) {
+      return delta;
+    }
+  }
+
+  return 0;
+}
+
+function defaultPlaywrightBrowserCacheDir() {
+  const explicit = process.env.PLAYWRIGHT_BROWSERS_PATH || "";
+
+  if (explicit && explicit !== "0") {
+    return path.resolve(explicit);
+  }
+
+  return path.join(os.homedir(), ".cache", "ms-playwright");
+}
+
+async function hasCachedChromiumRevision(revision) {
+  if (!revision) {
+    return false;
+  }
+
+  const browserCacheDir = defaultPlaywrightBrowserCacheDir();
+  const revisionDir = path.join(browserCacheDir, `chromium-${revision}`);
+
+  return (
+    await pathExists(path.join(revisionDir, "chrome-linux", "chrome"))
+    || await pathExists(path.join(revisionDir, "chrome-linux64", "chrome"))
+    || await pathExists(path.join(revisionDir, "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"))
+    || await pathExists(path.join(revisionDir, "chrome-win", "chrome.exe"))
+  );
+}
+
+async function addPlaywrightPackageCandidate(candidates, packageJsonPath) {
+  const resolved = path.resolve(packageJsonPath);
+
+  if (candidates.has(resolved) || !(await pathExists(resolved))) {
+    return;
+  }
+
+  candidates.add(resolved);
+}
+
+async function addPnpmPlaywrightPackageCandidates(candidates, pnpmDir) {
+  for (const entry of await safeReadDir(pnpmDir, { withFileTypes: true })) {
+    if (entry.isDirectory() && entry.name.startsWith("playwright@")) {
+      await addPlaywrightPackageCandidate(
+        candidates,
+        path.join(pnpmDir, entry.name, "node_modules", "playwright", "package.json")
+      );
+    }
+  }
+}
+
+async function discoverPlaywrightPackageCandidates() {
+  const candidates = new Set();
+  const home = os.homedir();
+
+  await addPlaywrightPackageCandidate(candidates, path.join(process.cwd(), "node_modules", "playwright", "package.json"));
+  await addPnpmPlaywrightPackageCandidates(candidates, path.join(process.cwd(), "node_modules", ".pnpm"));
+
+  for (const entry of await safeReadDir(path.join(home, ".npm", "_npx"), { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      await addPlaywrightPackageCandidate(
+        candidates,
+        path.join(home, ".npm", "_npx", entry.name, "node_modules", "playwright", "package.json")
+      );
+    }
+  }
+
+  const workspaceRoots = [
+    path.join(home, "chat"),
+    path.join(home, "chat-workspaces")
+  ];
+
+  for (const root of workspaceRoots) {
+    for (const workspace of await safeReadDir(root, { withFileTypes: true })) {
+      if (!workspace.isDirectory()) {
+        continue;
+      }
+
+      const workspaceDir = path.join(root, workspace.name);
+      const packageRoots = [
+        path.join(workspaceDir, "node_modules", "playwright", "package.json"),
+        path.join(workspaceDir, "workspace", "node_modules", "playwright", "package.json")
+      ];
+
+      for (const packageRoot of packageRoots) {
+        await addPlaywrightPackageCandidate(candidates, packageRoot);
+      }
+
+      const pnpmDirs = [
+        path.join(workspaceDir, "node_modules", ".pnpm"),
+        path.join(workspaceDir, "workspace", "node_modules", ".pnpm")
+      ];
+
+      for (const pnpmDir of pnpmDirs) {
+        await addPnpmPlaywrightPackageCandidates(candidates, pnpmDir);
+      }
+    }
+  }
+
+  return Array.from(candidates);
+}
+
+async function inspectPlaywrightPackage(packageJsonPath) {
+  const requireFrom = createRequire(packageJsonPath);
+  const packageJson = await readJsonFile(packageJsonPath);
+  const corePackageJsonPath = requireFrom.resolve("playwright-core/package.json");
+  const browsersJsonPath = path.join(path.dirname(corePackageJsonPath), "browsers.json");
+  const browsersJson = await readJsonFile(browsersJsonPath);
+  const chromium = (browsersJson.browsers || []).find((browser) => browser.name === "chromium");
+  const cachedChromium = await hasCachedChromiumRevision(chromium?.revision || "");
+
+  return {
+    packageJsonPath,
+    version: packageJson.version || "0",
+    chromiumRevision: chromium?.revision || "",
+    cachedChromium
+  };
+}
+
+async function readCachedPlaywrightRuntime(artifactsDir) {
+  if (!artifactsDir) {
+    return "";
+  }
+
+  const runtimePath = path.join(artifactsDir, "playwright-runtime.json");
+
+  try {
+    const runtime = await readJsonFile(runtimePath);
+    const packageJsonPath = requirePathFrom(runtime?.playwrightRequireFrom || "");
+
+    if (packageJsonPath && await pathExists(packageJsonPath)) {
+      const inspected = await inspectPlaywrightPackage(packageJsonPath);
+
+      if (inspected.cachedChromium) {
+        return packageJsonPath;
+      }
+    }
+  } catch {
+    // Ignore stale or incompatible runtime cache entries.
+  }
+
+  return "";
+}
+
+async function writeCachedPlaywrightRuntime(artifactsDir, inspected) {
+  if (!artifactsDir || !inspected?.packageJsonPath) {
+    return;
+  }
+
+  const runtimePath = path.join(artifactsDir, "playwright-runtime.json");
+  const payload = {
+    playwrightRequireFrom: inspected.packageJsonPath,
+    version: inspected.version,
+    chromiumRevision: inspected.chromiumRevision,
+    cachedChromium: inspected.cachedChromium,
+    resolvedAt: new Date().toISOString()
+  };
+
+  await fs.mkdir(artifactsDir, { recursive: true });
+  await fs.writeFile(runtimePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8").catch(() => {});
+}
+
+async function resolvePlaywrightRequireFrom(explicitRequireFrom = "", artifactsDir = "") {
+  if (explicitRequireFrom) {
+    return explicitRequireFrom;
+  }
+
+  const cached = await readCachedPlaywrightRuntime(artifactsDir);
+
+  if (cached) {
+    return cached;
+  }
+
+  const inspected = [];
+
+  for (const packageJsonPath of await discoverPlaywrightPackageCandidates()) {
+    try {
+      inspected.push(await inspectPlaywrightPackage(packageJsonPath));
+    } catch {
+      // Ignore incomplete package installs.
+    }
+  }
+
+  inspected.sort((left, right) => {
+    if (left.cachedChromium !== right.cachedChromium) {
+      return left.cachedChromium ? -1 : 1;
+    }
+
+    return -compareVersions(left.version, right.version);
+  });
+
+  const selected = inspected.find((candidate) => candidate.cachedChromium);
+
+  if (!selected) {
+    return "";
+  }
+
+  await writeCachedPlaywrightRuntime(artifactsDir, selected);
+  return selected.packageJsonPath;
+}
+
 async function loadPlaywright(explicitRequireFrom = "") {
+  const resolvedRequireFrom = await resolvePlaywrightRequireFrom(explicitRequireFrom);
   const candidates = [
-    ...(explicitRequireFrom ? [createRequire(explicitRequireFrom)] : []),
+    ...(resolvedRequireFrom ? [createRequire(resolvedRequireFrom)] : []),
     createRequire(path.join(process.cwd(), "package.json")),
     createRequire(import.meta.url)
   ];
@@ -2099,6 +2326,7 @@ async function deployControlUrl(options) {
   await fs.mkdir(deployDir, { recursive: true });
   await fs.mkdir(options.artifactsDir, { recursive: true });
   await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await repairMissingRegisteredBrowserHandoffManifests(options, manifestPath);
   await execFileAsync(options.siteManager, ["deploy", manifestPath], {
     cwd: process.cwd(),
     maxBuffer: 1024 * 1024
@@ -2137,6 +2365,125 @@ async function deployControlUrl(options) {
   console.log("After sending the Control URL, end the agent turn. Resume only when the user messages back, then read artifacts/browser-handoff/latest.json.");
 
   return controlUrl;
+}
+
+async function resolveExecutableFromPath(executable) {
+  if (executable.includes(path.sep)) {
+    return fs.realpath(executable).catch(() => path.resolve(executable));
+  }
+
+  try {
+    const { stdout } = await execFileAsync("which", [executable], { maxBuffer: 1024 * 64 });
+    const resolved = stdout.trim().split("\n")[0];
+
+    if (resolved) {
+      return fs.realpath(resolved).catch(() => resolved);
+    }
+  } catch {
+    // Fall through to the unresolved executable name.
+  }
+
+  return executable;
+}
+
+async function resolveSiteManagerRegistryPath(siteManager) {
+  const resolvedSiteManager = await resolveExecutableFromPath(siteManager);
+  const candidate = path.join(path.dirname(resolvedSiteManager), "caddy-sites.json");
+
+  if (await pathExists(candidate)) {
+    return candidate;
+  }
+
+  return "";
+}
+
+function inferBrowserHandoffSubdomainFromManifestPath(manifestPath) {
+  const normalized = manifestPath.split(path.sep).join("/");
+  const match = normalized.match(/\/artifacts\/browser-handoff(?:-[^/]+)?\/deploy\/([^/]+)\/website\.json$/);
+
+  if (!match) {
+    return "";
+  }
+
+  const subdomain = match[1];
+  return /^[a-z0-9-]+$/i.test(subdomain) ? subdomain : "";
+}
+
+async function createExpiredBrowserHandoffManifest(manifestPath, subdomain) {
+  const deployDir = path.dirname(manifestPath);
+  const placeholderRoot = path.join(deployDir, "placeholder");
+  const manifest = [
+    {
+      subdomain,
+      access: { mode: "token" },
+      static: { root: placeholderRoot }
+    }
+  ];
+
+  await fs.mkdir(placeholderRoot, { recursive: true });
+  await fs.writeFile(
+    path.join(placeholderRoot, "index.html"),
+    "<!doctype html>\n<meta charset=\"utf-8\">\n<title>Expired browser handoff</title>\n<p>This browser handoff session has expired.</p>\n",
+    "utf8"
+  );
+  await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+}
+
+async function repairMissingRegisteredBrowserHandoffManifests(options, currentManifestPath) {
+  const registryPath = await resolveSiteManagerRegistryPath(options.siteManager);
+
+  if (!registryPath) {
+    return;
+  }
+
+  let registry;
+
+  try {
+    registry = await readJsonFile(registryPath);
+  } catch {
+    return;
+  }
+
+  if (!Array.isArray(registry.manifests)) {
+    return;
+  }
+
+  const registryDir = path.dirname(registryPath);
+  let registryChanged = false;
+
+  for (const registeredPath of registry.manifests) {
+    if (typeof registeredPath !== "string" || !registeredPath.trim()) {
+      continue;
+    }
+
+    const manifestPath = path.resolve(registryDir, registeredPath);
+
+    if (manifestPath === currentManifestPath || await pathExists(manifestPath)) {
+      continue;
+    }
+
+    const subdomain = inferBrowserHandoffSubdomainFromManifestPath(manifestPath);
+
+    if (!subdomain) {
+      continue;
+    }
+
+    await createExpiredBrowserHandoffManifest(manifestPath, subdomain);
+    registry.expires = registry.expires && typeof registry.expires === "object" && !Array.isArray(registry.expires)
+      ? registry.expires
+      : {};
+
+    const existingExpiry = registry.expires[subdomain];
+
+    if (existingExpiry === undefined || Number.isNaN(Date.parse(existingExpiry)) || Date.parse(existingExpiry) > Date.now()) {
+      registry.expires[subdomain] = "1970-01-01T00:00:00.000Z";
+      registryChanged = true;
+    }
+  }
+
+  if (registryChanged) {
+    await fs.writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`, "utf8");
+  }
 }
 
 async function runVncBrowserServer(options) {
@@ -2302,6 +2649,7 @@ async function main() {
 
   const options = parseArgs(process.argv.slice(2));
   prepareLifecycleOptions(options);
+  options.playwrightRequireFrom = await resolvePlaywrightRequireFrom(options.playwrightRequireFrom, options.artifactsDir);
 
   if (options.mode === "deploy") {
     await preflightBrowserRuntime(options);

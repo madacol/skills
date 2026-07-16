@@ -32,7 +32,7 @@ Send the printed `Control URL` to the user. Say what page is open, what they nee
 
 The helper must not print a `Control URL` unless local preflight confirms the runtime dependencies needed by the deployed service, including Playwright and a usable Chromium executable. If the helper fails before printing the URL, report the concrete preflight error instead of retrying blindly. A missing `latest.json` before the user clicks Continue/Save is normal; it is not evidence by itself that deployment failed.
 
-If Playwright is already installed outside the current workspace, prefer reusing that pinned installation and its already-cached browser revision instead of installing or downloading anything. Pass the Playwright package root or package.json with `--playwright-require-from <path>`; the helper will propagate that path to the deployed service and record it for `resume` commands.
+Do not manually inspect Playwright installs, browser cache revisions, or deployment registry state before normal use. The helper owns those preflight and recovery details. Only pass runtime override flags such as `--playwright-require-from` after the helper reports a concrete failure that requires an override.
 
 Do not poll, sleep-loop, monitor, or keep the agent turn open while the user has control. Resume only after the user sends a follow-up message such as “continue”, asks for status, or gives new direction. At that point, read `artifacts/browser-handoff/latest.json` in the workspace that launched the helper, then reconnect to the same live Chromium session through the active-state path it records:
 
