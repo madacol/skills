@@ -13,6 +13,8 @@ import { promisify } from "node:util";
 
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
 const DEFAULT_TTL_MINUTES = 30;
+const DEFAULT_STALE_CHROMIUM_GRACE_MINUTES = 60;
+const PROFILE_MARKER_FILE = ".browser-handoff-profile.json";
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 const OUTCOMES = new Set(["continue", "save_later", "cancel"]);
 const CONTROL_MODES = new Set(["vnc"]);
@@ -517,6 +519,10 @@ async function pathExists(filePath) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function readJsonFile(filePath) {
   return JSON.parse(await fs.readFile(filePath, "utf8"));
 }
@@ -790,6 +796,274 @@ async function waitForCdpEndpoint(profileDir, timeoutMs = 8_000) {
   }
 
   throw new Error(`Chromium CDP endpoint did not become ready. ${lastError}`);
+}
+
+function staleChromiumGraceMs() {
+  const minutes = parseNonNegativeNumber(
+    process.env.BROWSER_HANDOFF_STALE_CHROMIUM_MINUTES || String(DEFAULT_STALE_CHROMIUM_GRACE_MINUTES),
+    "stale Chromium grace minutes"
+  );
+
+  return Math.round(minutes * 60_000);
+}
+
+function normalizeProfileDir(profileDir) {
+  return path.resolve(profileDir);
+}
+
+function profileMarkerPath(profileDir) {
+  return path.join(normalizeProfileDir(profileDir), PROFILE_MARKER_FILE);
+}
+
+function parseTimestampMs(value) {
+  const timestamp = Date.parse(value || "");
+
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function latestTimestampMs(...values) {
+  return Math.max(0, ...values.map(parseTimestampMs));
+}
+
+function pathContains(parentPath, childPath) {
+  const relative = path.relative(path.resolve(parentPath), path.resolve(childPath));
+
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function commandUsesProfile(command, profileDir) {
+  const normalized = normalizeProfileDir(profileDir);
+
+  return (
+    command.includes(`--user-data-dir=${normalized}`)
+    || command.includes(`--user-data-dir ${normalized}`)
+    || command.includes(`--user-data-dir="${normalized}"`)
+    || command.includes(`--user-data-dir '${normalized}'`)
+  );
+}
+
+function commandLooksLikeChromium(command) {
+  const executable = command.trimStart().replace(/^"/, "");
+
+  return /(^|\/)(chromium|chrome)(\s|$|")/.test(executable);
+}
+
+async function listChromiumProcessesForProfile(profileDir) {
+  let stdout = "";
+
+  try {
+    const result = await execFileAsync("ps", ["-eww", "-o", "pid=,etimes=,args="], {
+      maxBuffer: 1024 * 1024 * 8
+    });
+    stdout = result.stdout;
+  } catch {
+    return [];
+  }
+
+  const processes = [];
+
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = line.trimStart().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+
+    if (!match) {
+      continue;
+    }
+
+    const pid = Number.parseInt(match[1], 10);
+    const elapsedSeconds = Number.parseInt(match[2], 10);
+    const command = match[3];
+
+    if (
+      Number.isInteger(pid)
+      && pid !== process.pid
+      && Number.isInteger(elapsedSeconds)
+      && commandLooksLikeChromium(command)
+      && commandUsesProfile(command, profileDir)
+    ) {
+      processes.push({ command, elapsedMs: elapsedSeconds * 1000, pid });
+    }
+  }
+
+  return processes;
+}
+
+async function readProfileMarker(profileDir) {
+  return await readJsonFile(profileMarkerPath(profileDir)).catch(() => undefined);
+}
+
+async function profileOwnership(options) {
+  const marker = await readProfileMarker(options.profileDir);
+  const normalizedProfileDir = normalizeProfileDir(options.profileDir);
+
+  if (marker && normalizeProfileDir(marker.profileDir || "") === normalizedProfileDir) {
+    return { marker, owned: true };
+  }
+
+  if (options.artifactsDir && pathContains(options.artifactsDir, options.profileDir)) {
+    return { marker, owned: true };
+  }
+
+  return { marker, owned: false };
+}
+
+async function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function terminateProcesses(processes, label) {
+  if (processes.length === 0) {
+    return;
+  }
+
+  for (const processInfo of processes) {
+    try {
+      process.kill(processInfo.pid, "SIGTERM");
+    } catch {
+      // Process already exited or cannot be signalled.
+    }
+  }
+
+  await sleep(750);
+
+  for (const processInfo of processes) {
+    if (await isProcessAlive(processInfo.pid)) {
+      try {
+        process.kill(processInfo.pid, "SIGKILL");
+      } catch {
+        // Process already exited or cannot be signalled.
+      }
+    }
+  }
+
+  console.error(`Cleaned ${processes.length} stale Chromium process(es) for ${label}.`);
+}
+
+function sessionRecordIsExpired(record) {
+  const expiresAt = parseTimestampMs(record?.expiresAt || "");
+
+  return expiresAt > 0 && expiresAt <= Date.now();
+}
+
+async function isCdpEndpointReachable(cdpEndpoint) {
+  if (!cdpEndpoint) {
+    return false;
+  }
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    let request;
+
+    const finish = (value) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      request?.destroy();
+      resolve(value);
+    };
+
+    try {
+      const url = new URL("/json/version", cdpEndpoint);
+      request = http.get(url, (response) => {
+        response.resume();
+        finish(response.statusCode !== undefined && response.statusCode >= 200 && response.statusCode < 500);
+      });
+      request.setTimeout(1_000, () => finish(false));
+      request.on("error", () => finish(false));
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+function recentRecordActivity(record, graceMs) {
+  const lastActivityAt = latestTimestampMs(record?.lastActivityAt, record?.updatedAt, record?.createdAt);
+
+  return lastActivityAt > 0 && Date.now() - lastActivityAt < graceMs;
+}
+
+async function runningRecordKeepsProfileActive(record, graceMs) {
+  if (!["running", "starting"].includes(record?.status) || sessionRecordIsExpired(record)) {
+    return false;
+  }
+
+  if (await isCdpEndpointReachable(record.cdpEndpoint || "")) {
+    return true;
+  }
+
+  return recentRecordActivity(record, graceMs);
+}
+
+async function sessionRecordPaths(options) {
+  const paths = new Set([options.activeStatePath, options.continuationStatePath].filter(Boolean));
+  const sessionsDir = path.join(options.artifactsDir, "sessions");
+
+  for (const entry of await safeReadDir(sessionsDir, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith(".json")) {
+      paths.add(path.join(sessionsDir, entry.name));
+    }
+  }
+
+  return Array.from(paths);
+}
+
+async function sessionRecordsForProfile(options) {
+  const normalizedProfileDir = normalizeProfileDir(options.profileDir);
+  const records = [];
+
+  for (const recordPath of await sessionRecordPaths(options)) {
+    const record = await readActiveSessionRecord(recordPath).catch(() => undefined);
+
+    if (record && normalizeProfileDir(record.profileDir || "") === normalizedProfileDir) {
+      records.push({ path: recordPath, record });
+    }
+  }
+
+  return records;
+}
+
+async function profileIsActiveOrRecent(options, graceMs, marker) {
+  if (marker && normalizeProfileDir(marker.profileDir || "") === normalizeProfileDir(options.profileDir)) {
+    if (await runningRecordKeepsProfileActive(marker, graceMs)) {
+      return true;
+    }
+  }
+
+  for (const { record } of await sessionRecordsForProfile(options)) {
+    if (await runningRecordKeepsProfileActive(record, graceMs)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function cleanupStaleChromiumForProfile(options) {
+  const graceMs = staleChromiumGraceMs();
+  const ownership = await profileOwnership(options);
+
+  if (!ownership.owned) {
+    return;
+  }
+
+  const processes = await listChromiumProcessesForProfile(options.profileDir);
+  const staleProcesses = processes.filter((processInfo) => processInfo.elapsedMs >= graceMs);
+
+  if (staleProcesses.length === 0) {
+    return;
+  }
+
+  if (await profileIsActiveOrRecent(options, graceMs, ownership.marker)) {
+    return;
+  }
+
+  await terminateProcesses(staleProcesses, options.profileDir);
 }
 
 async function resolveBrowserPath(explicitPath) {
@@ -1088,6 +1362,49 @@ async function writePrivateRecord(recordPath, value) {
   await fs.chmod(recordPath, 0o600);
 }
 
+async function writeProfileMarker(options, patch = {}) {
+  const markerPath = profileMarkerPath(options.profileDir);
+  const existing = await readProfileMarker(options.profileDir);
+  const sameSession = existing?.activeId === options.activeId;
+  const now = new Date().toISOString();
+  const marker = {
+    kind: "browser-handoff-profile",
+    ...existing,
+    activeId: options.activeId,
+    status: patch.status || existing?.status || "running",
+    profileDir: normalizeProfileDir(options.profileDir),
+    artifactsDir: options.artifactsDir,
+    activeStatePath: options.activeStatePath,
+    continuationStatePath: options.continuationStatePath,
+    createdAt: sameSession ? existing.createdAt || now : now,
+    updatedAt: now,
+    lastActivityAt: patch.lastActivityAt || (sameSession ? existing.lastActivityAt : "") || now,
+    expiresAt: options.expiresAt || (sameSession ? existing.expiresAt : "") || "",
+    cdpEndpoint: options.cdpEndpoint || patch.cdpEndpoint || (sameSession ? existing.cdpEndpoint : "") || "",
+    ...patch
+  };
+
+  await fs.mkdir(options.profileDir, { recursive: true, mode: 0o700 });
+  await writePrivateRecord(markerPath, marker);
+}
+
+async function touchSessionActivity(options, patch = {}) {
+  const now = new Date().toISOString();
+  const activityPatch = {
+    status: "running",
+    cdpEndpoint: options.cdpEndpoint || patch.cdpEndpoint || "",
+    lastActivityAt: now,
+    ...patch
+  };
+
+  await writeProfileMarker(options, activityPatch);
+  await patchActiveSessionRecord(options, {
+    lastActivityAt: activityPatch.lastActivityAt,
+    updatedAt: activityPatch.lastActivityAt,
+    cdpEndpoint: activityPatch.cdpEndpoint || options.cdpEndpoint || ""
+  }).catch(() => {});
+}
+
 async function replaceSessionRecord(recordPath, options, record) {
   await withRecordLock(recordPath, async () => {
     const existing = await readActiveSessionRecord(recordPath).catch(() => undefined);
@@ -1100,7 +1417,9 @@ async function replaceSessionRecord(recordPath, options, record) {
     await writePrivateRecord(recordPath, {
       ...record,
       createdAt: sameSession ? existing.createdAt || record.createdAt : record.createdAt,
-      cdpEndpoint: options.cdpEndpoint || (sameSession ? existing.cdpEndpoint : "") || ""
+      cdpEndpoint: options.cdpEndpoint || (sameSession ? existing.cdpEndpoint : "") || "",
+      updatedAt: record.updatedAt || new Date().toISOString(),
+      lastActivityAt: record.lastActivityAt || (sameSession ? existing.lastActivityAt : "") || record.createdAt
     });
   });
 }
@@ -1117,18 +1436,25 @@ async function patchSessionRecord(recordPath, options, patch) {
       throw new Error(`Browser handoff ${options.activeId} has already stopped.`);
     }
 
-    await writePrivateRecord(recordPath, { ...record, ...patch });
+    await writePrivateRecord(recordPath, {
+      ...record,
+      ...patch,
+      updatedAt: patch.updatedAt || new Date().toISOString()
+    });
   });
 }
 
 async function writeActiveSessionRecord(options, controlUrl = "", status = "running") {
+  const now = new Date().toISOString();
   const record = {
     activeId: options.activeId,
     status,
     targetUrl: options.targetUrl,
     controlUrl,
     stopUrl: buildStopUrl(controlUrl, options.token),
-    createdAt: new Date().toISOString(),
+    createdAt: now,
+    updatedAt: now,
+    lastActivityAt: now,
     expiresAt: options.expiresAt || "",
     artifactsDir: options.artifactsDir,
     runDir: options.runDir,
@@ -1162,10 +1488,13 @@ async function clearActiveSessionIfCurrent(options) {
       const record = await readActiveSessionRecord(recordPath).catch(() => undefined);
 
       if (record?.activeId === options.activeId) {
+        const stoppedAt = new Date().toISOString();
+
         await writePrivateRecord(recordPath, {
           ...record,
           status: "stopped",
-          stoppedAt: new Date().toISOString(),
+          stoppedAt,
+          updatedAt: stoppedAt,
           controlUrl: "",
           stopUrl: "",
           cdpEndpoint: ""
@@ -1359,8 +1688,10 @@ async function saveCurrentSession(state, outcomeInput = "continue") {
   await fs.writeFile(linksPath, `${await visibleLinks(page)}\n`, "utf8");
   await state.context.storageState({ path: state.options.storageStatePath });
 
+  const savedAt = new Date().toISOString();
+
   state.lastSave = {
-    savedAt: new Date().toISOString(),
+    savedAt,
     outcome,
     continuity: "live_session",
     controlState: outcome === "continue" ? "ready_for_agent" : outcome === "save_later" ? "suspended" : "canceled",
@@ -1377,6 +1708,10 @@ async function saveCurrentSession(state, outcomeInput = "continue") {
   };
 
   await fs.writeFile(state.options.latestJsonPath, `${JSON.stringify(state.lastSave, null, 2)}\n`, "utf8");
+  await touchSessionActivity(state.options, {
+    lastActivityAt: savedAt,
+    status: outcome === "cancel" ? "stopped" : "running"
+  });
 
   return state.lastSave;
 }
@@ -1490,6 +1825,17 @@ async function gotoUrl(state, destination) {
   await settlePage(page);
 
   return page.url();
+}
+
+function touchStateActivity(state, patch = {}) {
+  const now = Date.now();
+
+  if (state.lastActivityTouchMs && now - state.lastActivityTouchMs < 30_000) {
+    return;
+  }
+
+  state.lastActivityTouchMs = now;
+  void touchSessionActivity(state.options, patch).catch(() => {});
 }
 
 function vncControlHtml(options) {
@@ -1895,6 +2241,8 @@ function createServer(state) {
         }
       }
 
+      touchStateActivity(state);
+
       if (request.method === "GET" && url.pathname === "/") {
         response.writeHead(200, {
           "content-type": "text/html; charset=utf-8",
@@ -2067,6 +2415,8 @@ function attachVncWebSocketProxy(server, state) {
       return;
     }
 
+    touchStateActivity(state);
+
     const accept = crypto
       .createHash("sha1")
       .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
@@ -2143,6 +2493,11 @@ async function closeBrowserAndServer(state) {
     await stopChildProcess(child);
   }
 
+  await writeProfileMarker(state.options, {
+    status: "stopped",
+    stoppedAt: new Date().toISOString(),
+    cdpEndpoint: ""
+  }).catch(() => {});
   await clearActiveSessionIfCurrent(state.options);
 }
 
@@ -2487,8 +2842,10 @@ async function repairMissingRegisteredBrowserHandoffManifests(options, currentMa
 }
 
 async function runVncBrowserServer(options) {
+  await cleanupStaleChromiumForProfile(options);
   await fs.mkdir(options.runDir, { recursive: true });
   await fs.mkdir(options.profileDir, { recursive: true });
+  await writeProfileMarker(options, { status: "starting" });
   await resolveVncRuntime(options);
 
   const playwright = await loadPlaywright(options.playwrightRequireFrom);
@@ -2542,6 +2899,11 @@ async function runVncBrowserServer(options) {
     context = await playwright.chromium.launchPersistentContext(options.profileDir, browserOptions);
     options.cdpEndpoint = await waitForCdpEndpoint(options.profileDir);
     await patchActiveSessionRecord(options, { cdpEndpoint: options.cdpEndpoint });
+    await writeProfileMarker(options, {
+      status: "running",
+      cdpEndpoint: options.cdpEndpoint,
+      lastActivityAt: new Date().toISOString()
+    });
     const initialPage = getActivePage(context, undefined) ?? await context.newPage();
     const state = {
       options,
@@ -2654,6 +3016,7 @@ async function main() {
   if (options.mode === "deploy") {
     await preflightBrowserRuntime(options);
     await stopPreviousActiveSession(options);
+    await cleanupStaleChromiumForProfile(options);
     await writeActiveSessionRecord(options, "", "starting");
 
     try {
@@ -2669,6 +3032,7 @@ async function main() {
 
   if (options.mode === "local") {
     await stopPreviousActiveSession(options);
+    await cleanupStaleChromiumForProfile(options);
     await writeActiveSessionRecord(options, "", "starting");
   }
 

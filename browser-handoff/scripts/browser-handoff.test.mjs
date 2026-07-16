@@ -1,16 +1,201 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import test from "node:test";
 
 const scriptPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "browser-handoff.mjs");
+const profileMarkerFile = ".browser-handoff-profile.json";
 
 function run(...args) {
+  return runWithEnv({}, ...args);
+}
+
+function runWithEnv(env, ...args) {
   return spawnSync(process.execPath, [scriptPath, ...args], {
     encoding: "utf8",
-    env: { ...process.env, BROWSER_HANDOFF_ACTIVE_STATE: "" }
+    env: { ...process.env, BROWSER_HANDOFF_ACTIVE_STATE: "", ...env }
   });
+}
+
+function fakeChromiumIsVisible(profileDir) {
+  const result = spawnSync("ps", ["-eww", "-o", "args="], { encoding: "utf8" });
+
+  return result.stdout.split(/\r?\n/).some((line) =>
+    line.trimStart().startsWith("chromium ")
+    && line.includes(`--user-data-dir=${profileDir}`)
+  );
+}
+
+async function waitFor(condition, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (condition()) {
+      return true;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  return false;
+}
+
+async function waitForChildExit(child, timeoutMs = 3_000) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return true;
+  }
+
+  return await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.off("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+
+    child.once("exit", onExit);
+  });
+}
+
+function childIsAlive(child) {
+  try {
+    process.kill(child.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function oldIso() {
+  return new Date(Date.now() - 3_600_000).toISOString();
+}
+
+function futureIso() {
+  return new Date(Date.now() + 3_600_000).toISOString();
+}
+
+function spawnFakeChromiumForProfile(profileDir) {
+  return spawn(
+    process.execPath,
+    ["-e", "setTimeout(() => {}, 300000)", "--", `--user-data-dir=${profileDir}`],
+    { argv0: "chromium", stdio: "ignore" }
+  );
+}
+
+function writeProfileMarker(profileDir, payload = {}) {
+  const timestamp = oldIso();
+
+  fs.mkdirSync(profileDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(profileDir, profileMarkerFile),
+    `${JSON.stringify({
+      kind: "browser-handoff-profile",
+      activeId: "test-active-id",
+      status: "stopped",
+      profileDir,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      lastActivityAt: timestamp,
+      ...payload
+    }, null, 2)}\n`,
+    { encoding: "utf8", mode: 0o600 }
+  );
+}
+
+function writeSessionRecord(recordPath, profileDir, payload = {}) {
+  const timestamp = oldIso();
+
+  fs.mkdirSync(path.dirname(recordPath), { recursive: true });
+  fs.writeFileSync(
+    recordPath,
+    `${JSON.stringify({
+      activeId: "test-active-id",
+      status: "running",
+      profileDir,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      lastActivityAt: timestamp,
+      expiresAt: futureIso(),
+      ...payload
+    }, null, 2)}\n`,
+    { encoding: "utf8", mode: 0o600 }
+  );
+}
+
+function runServeStartup(tmpDir, profileDir, env = {}) {
+  return runWithEnv(
+    env,
+    "http://example.invalid",
+    "--serve",
+    "--artifacts-dir",
+    path.join(tmpDir, "artifacts"),
+    "--profile-dir",
+    profileDir,
+    "--storage-state",
+    path.join(tmpDir, "storage-state.json"),
+    "--active-state",
+    path.join(tmpDir, "active.json"),
+    "--xvfb",
+    "/bin/false",
+    "--x11vnc",
+    "/bin/false",
+    "--novnc-web",
+    path.join(tmpDir, "missing-novnc")
+  );
+}
+
+async function waitUntilProcessIsOldEnough(profileDir) {
+  assert.equal(await waitFor(() => fakeChromiumIsVisible(profileDir)), true);
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
+}
+
+async function startFakeCdpServer(t) {
+  const child = spawn(process.execPath, [
+    "-e",
+    [
+      "const http = require('node:http');",
+      "const server = http.createServer((request, response) => {",
+      "  if (request.url === '/json/version') {",
+      "    response.writeHead(200, { 'content-type': 'application/json' });",
+      "    response.end('{}\\n');",
+      "    return;",
+      "  }",
+      "  response.writeHead(404);",
+      "  response.end();",
+      "});",
+      "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+      "setInterval(() => {}, 300000);"
+    ].join("\n")
+  ], { stdio: ["ignore", "pipe", "ignore"] });
+
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
+  });
+
+  const port = await new Promise((resolve, reject) => {
+    let stdout = "";
+    const timer = setTimeout(() => reject(new Error("Timed out waiting for fake CDP server.")), 3_000);
+
+    child.once("error", reject);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+
+      if (stdout.includes("\n")) {
+        clearTimeout(timer);
+        resolve(stdout.trim().split(/\r?\n/)[0]);
+      }
+    });
+  });
+
+  return `http://127.0.0.1:${port}`;
 }
 
 test("resume help describes the agent continuation commands", () => {
@@ -28,4 +213,80 @@ test("resume reports a missing active session before loading Playwright", () => 
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /No active browser handoff/);
+});
+
+test("startup cleanup terminates a stale Chromium process for the same profile", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-handoff-cleanup-"));
+  const profileDir = path.join(tmpDir, "profile");
+  const child = spawnFakeChromiumForProfile(profileDir);
+
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
+
+    fs.rmSync(tmpDir, { force: true, recursive: true });
+  });
+
+  writeProfileMarker(profileDir);
+  await waitUntilProcessIsOldEnough(profileDir);
+
+  const result = runServeStartup(tmpDir, profileDir, { BROWSER_HANDOFF_STALE_CHROMIUM_MINUTES: "0.01" });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Cleaned 1 stale Chromium process/);
+  assert.equal(await waitForChildExit(child), true);
+});
+
+test("startup cleanup preserves a stale-looking process with recent profile activity", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-handoff-cleanup-recent-"));
+  const profileDir = path.join(tmpDir, "profile");
+  const child = spawnFakeChromiumForProfile(profileDir);
+
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
+
+    fs.rmSync(tmpDir, { force: true, recursive: true });
+  });
+
+  await waitUntilProcessIsOldEnough(profileDir);
+  writeProfileMarker(profileDir, {
+    status: "running",
+    updatedAt: new Date().toISOString(),
+    lastActivityAt: new Date().toISOString()
+  });
+
+  const result = runServeStartup(tmpDir, profileDir, { BROWSER_HANDOFF_STALE_CHROMIUM_MINUTES: "0.01" });
+
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(result.stderr, /Cleaned 1 stale Chromium process/);
+  assert.equal(childIsAlive(child), true);
+});
+
+test("startup cleanup preserves a stale-looking process with reachable session CDP", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-handoff-cleanup-cdp-"));
+  const profileDir = path.join(tmpDir, "profile");
+  const activeStatePath = path.join(tmpDir, "active.json");
+  const child = spawnFakeChromiumForProfile(profileDir);
+  const cdpEndpoint = await startFakeCdpServer(t);
+
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
+
+    fs.rmSync(tmpDir, { force: true, recursive: true });
+  });
+
+  writeProfileMarker(profileDir);
+  writeSessionRecord(activeStatePath, profileDir, { cdpEndpoint });
+  await waitUntilProcessIsOldEnough(profileDir);
+
+  const result = runServeStartup(tmpDir, profileDir, { BROWSER_HANDOFF_STALE_CHROMIUM_MINUTES: "0.01" });
+
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(result.stderr, /Cleaned 1 stale Chromium process/);
+  assert.equal(childIsAlive(child), true);
 });
