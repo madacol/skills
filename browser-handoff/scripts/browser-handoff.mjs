@@ -62,6 +62,7 @@ const execFileAsync = promisify(execFile);
  * siteManager: string,
  * nodePath: string,
  * scriptPath: string,
+ * playwrightRequireFrom: string,
  * trustProxyToken: boolean,
  * xvfbPath: string,
  * x11vncPath: string,
@@ -103,6 +104,8 @@ Options:
   --slow-mo <ms>                Playwright slowMo. Default: 50
   --site-manager <path>         site-manager executable. Default: site-manager
   --node <path>                 Node executable for deployed service. Default: current node
+  --playwright-require-from <path>
+                               Resolve Playwright from this package.json or package directory
   --xvfb <path>                 Xvfb executable for --control vnc. Default: discovered from PATH
   --x11vnc <path>               x11vnc executable for --control vnc. Default: discovered from PATH
   --novnc-web <path>            noVNC web root containing vnc.html. Default: common system locations
@@ -119,6 +122,7 @@ Environment mirrors:
   BROWSER_HANDOFF_STORAGE_STATE, BROWSER_HANDOFF_HEADLESS,
   BROWSER_HANDOFF_SUBDOMAIN,
   BROWSER_HANDOFF_SITE_MANAGER, BROWSER_HANDOFF_ALLOW_EXTERNAL_HOST,
+  BROWSER_HANDOFF_PLAYWRIGHT_REQUIRE_FROM,
   BROWSER_HANDOFF_DEVICE, BROWSER_HANDOFF_USER_AGENT,
   BROWSER_HANDOFF_IS_MOBILE, BROWSER_HANDOFF_HAS_TOUCH,
   BROWSER_HANDOFF_DEVICE_SCALE_FACTOR,
@@ -130,12 +134,12 @@ Environment mirrors:
 
 function resumeUsage() {
   return `Usage:
-  browser-handoff.mjs resume inspect [--active-state <path>]
-  browser-handoff.mjs resume goto <url> [--active-state <path>]
-  browser-handoff.mjs resume click <selector> [--active-state <path>]
-  browser-handoff.mjs resume fill <selector> <text> [--active-state <path>]
-  browser-handoff.mjs resume press <selector> <key> [--active-state <path>]
-  browser-handoff.mjs resume screenshot [path] [--active-state <path>]
+  browser-handoff.mjs resume inspect [--active-state <path>] [--playwright-require-from <path>]
+  browser-handoff.mjs resume goto <url> [--active-state <path>] [--playwright-require-from <path>]
+  browser-handoff.mjs resume click <selector> [--active-state <path>] [--playwright-require-from <path>]
+  browser-handoff.mjs resume fill <selector> <text> [--active-state <path>] [--playwright-require-from <path>]
+  browser-handoff.mjs resume press <selector> <key> [--active-state <path>] [--playwright-require-from <path>]
+  browser-handoff.mjs resume screenshot [path] [--active-state <path>] [--playwright-require-from <path>]
 
 Connects to the Chromium process recorded by the active browser handoff and
 performs one agent action without closing the live browser.
@@ -241,6 +245,15 @@ function parseOptionalPositiveNumber(value, label) {
   }
 
   return parsePositiveNumber(value, label);
+}
+
+function requirePathFrom(value) {
+  if (!value) {
+    return "";
+  }
+
+  const resolved = path.resolve(String(value));
+  return path.basename(resolved) === "package.json" ? resolved : path.join(resolved, "package.json");
 }
 
 function parseViewport(value) {
@@ -410,6 +423,9 @@ function parseArgs(argv) {
     siteManager: flags.get("site-manager") || process.env.BROWSER_HANDOFF_SITE_MANAGER || "site-manager",
     nodePath: flags.get("node") || process.execPath,
     scriptPath: fileURLToPath(import.meta.url),
+    playwrightRequireFrom: requirePathFrom(
+      flags.get("playwright-require-from") || process.env.BROWSER_HANDOFF_PLAYWRIGHT_REQUIRE_FROM || ""
+    ),
     trustProxyToken: flags.has("trust-proxy-token"),
     xvfbPath: flags.get("xvfb") || process.env.BROWSER_HANDOFF_XVFB || "",
     x11vncPath: flags.get("x11vnc") || process.env.BROWSER_HANDOFF_X11VNC || "",
@@ -434,6 +450,7 @@ function parseResumeArgs(argv) {
     "artifacts",
     "browser-handoff-active.json"
   );
+  let playwrightRequireFrom = requirePathFrom(process.env.BROWSER_HANDOFF_PLAYWRIGHT_REQUIRE_FROM || "");
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -446,6 +463,18 @@ function parseResumeArgs(argv) {
       }
 
       activeStatePath = path.resolve(value);
+      index += 1;
+      continue;
+    }
+
+    if (arg === "--playwright-require-from") {
+      const value = args[index + 1];
+
+      if (!value || value.startsWith("--")) {
+        fail("Missing value for --playwright-require-from");
+      }
+
+      playwrightRequireFrom = requirePathFrom(value);
       index += 1;
       continue;
     }
@@ -475,7 +504,7 @@ function parseResumeArgs(argv) {
     fail(`Invalid arguments for resume ${action}.\n\n${resumeUsage()}`);
   }
 
-  return { action, positional, activeStatePath };
+  return { action, positional, activeStatePath, playwrightRequireFrom };
 }
 
 async function pathExists(filePath) {
@@ -487,8 +516,9 @@ async function pathExists(filePath) {
   }
 }
 
-async function loadPlaywright() {
+async function loadPlaywright(explicitRequireFrom = "") {
   const candidates = [
+    ...(explicitRequireFrom ? [createRequire(explicitRequireFrom)] : []),
     createRequire(path.join(process.cwd(), "package.json")),
     createRequire(import.meta.url)
   ];
@@ -612,6 +642,33 @@ async function resolveVncRuntime(options) {
   options.noVncWebRoot = noVncWebRoot;
 
   return { xvfbPath, x11vncPath, noVncWebRoot };
+}
+
+async function preflightBrowserRuntime(options) {
+  if (options.controlMode === "vnc") {
+    await resolveVncRuntime(options);
+  }
+
+  const playwright = await loadPlaywright(options.playwrightRequireFrom);
+  const executablePath = await resolveBrowserPath(options.browserPath);
+
+  if (options.deviceName) {
+    findDeviceDescriptor(playwright, options.deviceName);
+  }
+
+  if (executablePath) {
+    return;
+  }
+
+  const managedChromiumPath = playwright.chromium.executablePath();
+
+  if (!(await pathExists(managedChromiumPath))) {
+    throw new Error(
+      `Chromium executable not found at ${managedChromiumPath}. `
+      + "Install the Playwright browser revision for the pinned project version, "
+      + "or provide --browser-path to an existing Chromium executable."
+    );
+  }
 }
 
 async function appendLog(logPath, text) {
@@ -852,6 +909,7 @@ async function writeActiveSessionRecord(options, controlUrl = "", status = "runn
     storageStatePath: options.storageStatePath,
     controlMode: options.controlMode,
     cdpEndpoint: options.cdpEndpoint || "",
+    playwrightRequireFrom: options.playwrightRequireFrom || undefined,
     deviceName: options.deviceName || undefined,
     viewport: options.viewport
   };
@@ -1096,7 +1154,7 @@ async function saveCurrentSession(state, outcomeInput = "continue") {
   return state.lastSave;
 }
 
-async function connectToActiveBrowser(activeStatePath) {
+async function connectToActiveBrowser(activeStatePath, explicitPlaywrightRequireFrom = "") {
   const record = await readActiveSessionRecord(activeStatePath);
 
   if (!record) {
@@ -1107,7 +1165,7 @@ async function connectToActiveBrowser(activeStatePath) {
     throw new Error(`Active browser handoff ${record.activeId || ""} has no agent continuation endpoint.`);
   }
 
-  const playwright = await loadPlaywright();
+  const playwright = await loadPlaywright(explicitPlaywrightRequireFrom || record.playwrightRequireFrom || "");
   const browser = await playwright.chromium.connectOverCDP(record.cdpEndpoint);
   const context = browser.contexts().at(-1);
 
@@ -1144,7 +1202,7 @@ async function inspectResumedPage(page) {
 
 async function runResumeCommand(argv) {
   const options = parseResumeArgs(argv);
-  const { page, record } = await connectToActiveBrowser(options.activeStatePath);
+  const { page, record } = await connectToActiveBrowser(options.activeStatePath, options.playwrightRequireFrom);
   let result;
 
   switch (options.action) {
@@ -1209,7 +1267,7 @@ async function gotoUrl(state, destination) {
 
 function vncControlHtml(options) {
   const vncPath = `vnc-ws?token=${encodeURIComponent(options.token)}`;
-  const iframeSrc = `/novnc/vnc.html?autoconnect=1&resize=remote&path=${encodeURIComponent(vncPath)}`;
+  const iframeSrc = `/novnc/vnc.html?autoconnect=1&resize=scale&show_dot=1&path=${encodeURIComponent(vncPath)}`;
 
   return `<!doctype html>
 <html lang="en">
@@ -1231,10 +1289,13 @@ function vncControlHtml(options) {
 
     body {
       margin: 0;
-      min-height: 100vh;
+      width: 100vw;
+      height: 100vh;
+      height: 100dvh;
       display: grid;
-      grid-template-rows: auto 1fr;
+      grid-template-rows: auto minmax(0, 1fr);
       background: #0f1419;
+      overflow: hidden;
     }
 
     .toolbar {
@@ -1245,6 +1306,7 @@ function vncControlHtml(options) {
       border-bottom: 1px solid #273440;
       background: #17212a;
       flex-wrap: wrap;
+      min-width: 0;
     }
 
     button, a {
@@ -1259,6 +1321,7 @@ function vncControlHtml(options) {
       line-height: 30px;
       text-decoration: none;
       cursor: pointer;
+      white-space: nowrap;
     }
 
     button:hover, a:hover {
@@ -1279,8 +1342,30 @@ function vncControlHtml(options) {
     iframe {
       width: 100%;
       height: 100%;
+      min-width: 0;
+      min-height: 0;
       border: 0;
       background: #050708;
+      display: block;
+    }
+
+    @media (max-width: 700px) {
+      .toolbar {
+        gap: 6px;
+        padding: 6px;
+      }
+
+      button, a {
+        height: 34px;
+        padding: 0 8px;
+        font-size: 12px;
+        line-height: 32px;
+      }
+
+      .status {
+        flex-basis: 100%;
+        margin-left: 0;
+      }
     }
   </style>
 </head>
@@ -1290,10 +1375,10 @@ function vncControlHtml(options) {
     <button id="saveLater" type="button">Save for Later</button>
     <button id="cancel" type="button">Cancel</button>
     <button id="stop" type="button">Stop</button>
-    <a href="${iframeSrc}" target="_blank" rel="noopener noreferrer">Open noVNC</a>
+    <a href="${iframeSrc}" target="_blank" rel="noopener noreferrer">Full Screen noVNC</a>
     <div id="status" class="status">Connected</div>
   </div>
-  <iframe src="${iframeSrc}" title="Remote browser"></iframe>
+  <iframe src="${iframeSrc}" title="Remote browser" allow="fullscreen"></iframe>
   <script>
     const token = ${JSON.stringify(options.token)};
     const statusEl = document.getElementById("status");
@@ -1723,6 +1808,10 @@ function buildServiceCommand(options) {
     command.push("--browser-path", options.browserPath);
   }
 
+  if (options.playwrightRequireFrom) {
+    command.push("--playwright-require-from", options.playwrightRequireFrom);
+  }
+
   if (options.xvfbPath) {
     command.push("--xvfb", options.xvfbPath);
   }
@@ -1901,7 +1990,7 @@ async function runVncBrowserServer(options) {
   await fs.mkdir(options.profileDir, { recursive: true });
   await resolveVncRuntime(options);
 
-  const playwright = await loadPlaywright();
+  const playwright = await loadPlaywright(options.playwrightRequireFrom);
   const executablePath = await resolveBrowserPath(options.browserPath);
   const browserOptions = buildBrowserOptions(playwright, options, executablePath);
   const childProcesses = [];
@@ -2061,6 +2150,7 @@ async function main() {
   prepareLifecycleOptions(options);
 
   if (options.mode === "deploy") {
+    await preflightBrowserRuntime(options);
     await stopPreviousActiveSession(options);
     await writeActiveSessionRecord(options, "", "starting");
 

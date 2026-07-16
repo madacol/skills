@@ -7,6 +7,8 @@ description: Open a live website in a controllable browser and send the user a p
 
 Use the bundled helper when a browsing task reaches a step that is easier or safer with the user directly controlling the live browser. The browser session is the thing being handed off: control changes hands, but the session remains the same session.
 
+For high-sensitivity sites such as government identity portals, tax portals, banking, healthcare, immigration, or any flow involving identity credentials, documents, payments, or other sensitive personal data, do not create a browser handoff until the user has explicitly approved the risk that the session is controlled through a private token URL on an external deployment domain. If that approval is not available or the request is blocked, guide the user through their own browser instead.
+
 ```bash
 node /home/mada/.agents/skills/browser-handoff/scripts/browser-handoff.mjs "https://example.com"
 ```
@@ -14,6 +16,7 @@ node /home/mada/.agents/skills/browser-handoff/scripts/browser-handoff.mjs "http
 Default behavior:
 
 - Uses a desktop Chromium session exposed through VNC/noVNC.
+- The embedded noVNC view uses local scaling so the remote desktop fits phone screens; if the embedded view is still constrained by browser chrome, tell the user to tap `Full Screen noVNC`.
 - Deploys a private token URL and prints only the user-facing `Control URL`.
 - Stops the previously active handoff before creating a new default handoff.
 - Self-closes after 30 minutes unless `--ttl-minutes` changes the TTL.
@@ -26,6 +29,10 @@ node /home/mada/.agents/skills/browser-handoff/scripts/browser-handoff.mjs "http
 ```
 
 Send the printed `Control URL` to the user. Say what page is open, what they need to do, and what you will do after they click Continue. Then end the turn.
+
+The helper must not print a `Control URL` unless local preflight confirms the runtime dependencies needed by the deployed service, including Playwright and a usable Chromium executable. If the helper fails before printing the URL, report the concrete preflight error instead of retrying blindly. A missing `latest.json` before the user clicks Continue/Save is normal; it is not evidence by itself that deployment failed.
+
+If Playwright is already installed outside the current workspace, prefer reusing that pinned installation and its already-cached browser revision instead of installing or downloading anything. Pass the Playwright package root or package.json with `--playwright-require-from <path>`; the helper will propagate that path to the deployed service and record it for `resume` commands.
 
 Do not poll, sleep-loop, monitor, or keep the agent turn open while the user has control. Resume only after the user sends a follow-up message such as “continue”, asks for status, or gives new direction. At that point, read `artifacts/browser-handoff/latest.json` in the workspace that launched the helper, then reconnect to the same live Chromium session through the active-state path it records:
 
@@ -63,6 +70,7 @@ Treat the user’s continue signal as a control boundary, not proof that the web
 - `--device <name>`: Playwright device profile, such as `iPhone 14` or `Pixel 7`; sets mobile viewport, user agent, touch support, and device scale.
 - `--user-agent <value>`, `--is-mobile <0|1>`, `--has-touch <0|1>`, `--device-scale-factor <n>`: explicit browser emulation overrides.
 - `--viewport <width>x<height>`: desktop viewport override. Default: `1440x960`.
+- `--playwright-require-from <path>`: resolve Playwright from an existing package root or `package.json`, useful when reusing a pinned installation outside the current workspace.
 - `--xvfb <path>`, `--x11vnc <path>`, `--novnc-web <path>`: explicit VNC runtime paths. `--novnc-web` must point to a directory containing `vnc.html`.
 - `--vnc-display <display>`, `--vnc-port <port>`: VNC backend internals; usually leave unset.
 - `--local`: run only a local control server for debugging.
