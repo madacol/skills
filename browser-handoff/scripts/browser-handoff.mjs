@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 import process from "node:process";
 import { createRequire } from "node:module";
@@ -10,9 +11,19 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
+const DEFAULT_TTL_MINUTES = 30;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
-const STREAM_BOUNDARY = "browser-handoff-frame";
 const OUTCOMES = new Set(["continue", "save_later", "cancel"]);
+const CONTROL_MODES = new Set(["vnc"]);
+const VNC_WEBSOCKET_PATH = "/vnc-ws";
+const NO_VNC_WEB_ROOT_CANDIDATES = [
+  "/usr/share/novnc",
+  "/usr/share/noVNC",
+  "/usr/local/share/novnc",
+  "/usr/local/share/noVNC",
+  "/opt/novnc",
+  "/opt/noVNC"
+];
 const execFileAsync = promisify(execFile);
 
 /** @typedef {{ width: number, height: number }} Viewport */
@@ -21,8 +32,15 @@ const execFileAsync = promisify(execFile);
  * host: string,
  * port: number,
  * token: string,
+ * activeId: string,
+ * activeStatePath: string,
+ * keepPrevious: boolean,
+ * ttlMinutes: number,
+ * ttlMs: number,
+ * expiresAt: string,
  * artifactsDir: string,
  * runDir: string,
+ * controlMode: "vnc",
  * profileDir: string,
  * storageStatePath: string,
  * latestJsonPath: string,
@@ -35,7 +53,6 @@ const execFileAsync = promisify(execFile);
  * deviceScaleFactor: number | undefined,
  * isMobile: boolean | undefined,
  * hasTouch: boolean | undefined,
- * frameIntervalMs: number,
  * allowExternalHost: boolean,
  * slowMo: number,
  * mode: "deploy" | "local" | "serve",
@@ -43,7 +60,12 @@ const execFileAsync = promisify(execFile);
  * siteManager: string,
  * nodePath: string,
  * scriptPath: string,
- * trustProxyToken: boolean
+ * trustProxyToken: boolean,
+ * xvfbPath: string,
+ * x11vncPath: string,
+ * noVncWebRoot: string,
+ * vncDisplay: string,
+ * vncPort: number
  * }} Options */
 
 function usage() {
@@ -60,10 +82,15 @@ Options:
   --host <host>                 Bind host in --local/--serve. Default: 127.0.0.1
   --port <port>                 Bind port in --local/--serve. Default: PORT or 8787
   --token <token>               Control-page bearer token. Default: random
+  --ttl-minutes <n>             Auto-close timeout. Default: 30. Use 0 to disable
+  --expires-at <iso>            Absolute expiration time, used internally by deployed services
+  --active-state <path>         Active-session record. Default: <artifacts-parent>/browser-handoff-active.json
+  --keep-previous               Do not stop the previously active handoff before creating this one
+  --control <vnc>               Control backend. Default: vnc
   --artifacts-dir <path>        Artifact root. Default: ./artifacts/browser-handoff
   --profile-dir <path>          Persistent Chromium profile. Default: <artifacts-dir>/profile
   --storage-state <path>        Storage-state output. Default: <artifacts-dir>/storage-state.json
-  --headless <0|1>              Headless Chromium. Default: 1
+  --headless <0|1>              Browser headless flag. VNC forces non-headless. Default: 0
   --browser-path <path>         Chromium executable. Default: BROWSER_PATH, /usr/bin/chromium, or Playwright managed
   --device <name>               Playwright device profile, e.g. "iPhone 14" or "Pixel 7"
   --user-agent <value>          Override browser user agent
@@ -71,22 +98,30 @@ Options:
   --has-touch <0|1>             Override touch support
   --device-scale-factor <n>     Override device scale factor
   --viewport <width>x<height>   Viewport. Default: 1440x960
-  --frame-interval-ms <ms>      Screenshot stream interval. Default: 500
   --slow-mo <ms>                Playwright slowMo. Default: 50
   --site-manager <path>         site-manager executable. Default: site-manager
   --node <path>                 Node executable for deployed service. Default: current node
+  --xvfb <path>                 Xvfb executable for --control vnc. Default: discovered from PATH
+  --x11vnc <path>               x11vnc executable for --control vnc. Default: discovered from PATH
+  --novnc-web <path>            noVNC web root containing vnc.html. Default: common system locations
+  --vnc-display <display>       X display for --control vnc. Default: random high display number
+  --vnc-port <port>             Local VNC TCP port for --control vnc. Default: random high 59xx port
   --allow-external-host         Allow non-loopback bind host in --local/--serve
   --help                       Show this help
 
 Environment mirrors:
   BROWSER_HANDOFF_HOST, BROWSER_HANDOFF_PORT, BROWSER_HANDOFF_TOKEN,
+  BROWSER_HANDOFF_CONTROL, BROWSER_HANDOFF_TTL_MINUTES, BROWSER_HANDOFF_EXPIRES_AT,
+  BROWSER_HANDOFF_ACTIVE_STATE, BROWSER_HANDOFF_KEEP_PREVIOUS,
   BROWSER_HANDOFF_ARTIFACTS_DIR, BROWSER_HANDOFF_PROFILE_DIR,
   BROWSER_HANDOFF_STORAGE_STATE, BROWSER_HANDOFF_HEADLESS,
-  BROWSER_HANDOFF_FRAME_INTERVAL_MS, BROWSER_HANDOFF_SUBDOMAIN,
+  BROWSER_HANDOFF_SUBDOMAIN,
   BROWSER_HANDOFF_SITE_MANAGER, BROWSER_HANDOFF_ALLOW_EXTERNAL_HOST,
   BROWSER_HANDOFF_DEVICE, BROWSER_HANDOFF_USER_AGENT,
   BROWSER_HANDOFF_IS_MOBILE, BROWSER_HANDOFF_HAS_TOUCH,
   BROWSER_HANDOFF_DEVICE_SCALE_FACTOR,
+  BROWSER_HANDOFF_XVFB, BROWSER_HANDOFF_X11VNC, BROWSER_HANDOFF_NOVNC_WEB,
+  BROWSER_HANDOFF_VNC_DISPLAY, BROWSER_HANDOFF_VNC_PORT,
   BROWSER_PATH, PORT
 `;
 }
@@ -122,6 +157,16 @@ function parsePort(value) {
   return port;
 }
 
+function parseControlMode(value) {
+  const mode = String(value || "vnc");
+
+  if (!CONTROL_MODES.has(mode)) {
+    fail(`Invalid control mode: ${value}. Expected vnc.`);
+  }
+
+  return mode;
+}
+
 function parsePositiveInt(value, label) {
   const parsed = Number.parseInt(String(value), 10);
 
@@ -140,6 +185,30 @@ function parsePositiveNumber(value, label) {
   }
 
   return parsed;
+}
+
+function parseNonNegativeNumber(value, label) {
+  const parsed = Number.parseFloat(String(value));
+
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    fail(`Invalid ${label}: ${value}`);
+  }
+
+  return parsed;
+}
+
+function parseExpiresAt(value) {
+  if (!value) {
+    return "";
+  }
+
+  const timestamp = Date.parse(String(value));
+
+  if (!Number.isFinite(timestamp)) {
+    fail(`Invalid expires-at timestamp: ${value}`);
+  }
+
+  return new Date(timestamp).toISOString();
 }
 
 function parseOptionalBoolean(value) {
@@ -173,6 +242,18 @@ function parseViewport(value) {
 
 function defaultSubdomain() {
   return `browser-handoff-${crypto.randomBytes(4).toString("hex")}`;
+}
+
+function defaultActiveId() {
+  return crypto.randomBytes(12).toString("hex");
+}
+
+function defaultVncDisplay() {
+  return `:${90 + crypto.randomInt(100)}`;
+}
+
+function defaultVncPort() {
+  return 5900 + crypto.randomInt(100);
 }
 
 function parseArgs(argv) {
@@ -252,7 +333,18 @@ function parseArgs(argv) {
       || process.env.BROWSER_HANDOFF_STORAGE_STATE
       || path.join(artifactsDir, "storage-state.json")
   );
+  const activeStatePath = path.resolve(
+    flags.get("active-state")
+      || process.env.BROWSER_HANDOFF_ACTIVE_STATE
+      || path.join(path.dirname(artifactsDir), "browser-handoff-active.json")
+  );
+  const ttlMinutes = parseNonNegativeNumber(
+    flags.get("ttl-minutes") || process.env.BROWSER_HANDOFF_TTL_MINUTES || String(DEFAULT_TTL_MINUTES),
+    "TTL minutes"
+  );
+  const expiresAt = parseExpiresAt(flags.get("expires-at") || process.env.BROWSER_HANDOFF_EXPIRES_AT || "");
   const viewportValue = flags.get("viewport") || process.env.BROWSER_HANDOFF_VIEWPORT || "";
+  const controlMode = parseControlMode(flags.get("control") || process.env.BROWSER_HANDOFF_CONTROL || "vnc");
   const mode = flags.has("serve") ? "serve" : flags.has("local") ? "local" : "deploy";
   const host = flags.get("host") || process.env.BROWSER_HANDOFF_HOST || "127.0.0.1";
   const allowExternalHost = flags.has("allow-external-host")
@@ -267,12 +359,19 @@ function parseArgs(argv) {
     host,
     port: parsePort(flags.get("port") || process.env.BROWSER_HANDOFF_PORT || process.env.PORT || "8787"),
     token: flags.get("token") || process.env.BROWSER_HANDOFF_TOKEN || crypto.randomBytes(18).toString("hex"),
+    activeId: flags.get("active-id") || process.env.BROWSER_HANDOFF_ACTIVE_ID || defaultActiveId(),
+    activeStatePath,
+    keepPrevious: flags.has("keep-previous") || parseBoolean(process.env.BROWSER_HANDOFF_KEEP_PREVIOUS, false),
+    ttlMinutes,
+    ttlMs: Math.round(ttlMinutes * 60_000),
+    expiresAt,
     artifactsDir,
     runDir,
+    controlMode,
     profileDir,
     storageStatePath,
     latestJsonPath: path.join(artifactsDir, "latest.json"),
-    headless: parseBoolean(flags.get("headless") || process.env.BROWSER_HANDOFF_HEADLESS, true),
+    headless: parseBoolean(flags.get("headless") || process.env.BROWSER_HANDOFF_HEADLESS, false),
     browserPath: flags.get("browser-path") || process.env.BROWSER_PATH || "",
     viewport: parseViewport(viewportValue || `${DEFAULT_VIEWPORT.width}x${DEFAULT_VIEWPORT.height}`),
     viewportWasExplicit: Boolean(viewportValue),
@@ -284,10 +383,6 @@ function parseArgs(argv) {
     ),
     isMobile: parseOptionalBoolean(flags.get("is-mobile") || process.env.BROWSER_HANDOFF_IS_MOBILE),
     hasTouch: parseOptionalBoolean(flags.get("has-touch") || process.env.BROWSER_HANDOFF_HAS_TOUCH),
-    frameIntervalMs: parsePositiveInt(
-      flags.get("frame-interval-ms") || process.env.BROWSER_HANDOFF_FRAME_INTERVAL_MS || "500",
-      "frame interval"
-    ),
     allowExternalHost,
     slowMo: Number.parseInt(flags.get("slow-mo") || process.env.BROWSER_HANDOFF_SLOW_MO || "50", 10),
     mode,
@@ -295,7 +390,12 @@ function parseArgs(argv) {
     siteManager: flags.get("site-manager") || process.env.BROWSER_HANDOFF_SITE_MANAGER || "site-manager",
     nodePath: flags.get("node") || process.execPath,
     scriptPath: fileURLToPath(import.meta.url),
-    trustProxyToken: flags.has("trust-proxy-token")
+    trustProxyToken: flags.has("trust-proxy-token"),
+    xvfbPath: flags.get("xvfb") || process.env.BROWSER_HANDOFF_XVFB || "",
+    x11vncPath: flags.get("x11vnc") || process.env.BROWSER_HANDOFF_X11VNC || "",
+    noVncWebRoot: flags.get("novnc-web") || process.env.BROWSER_HANDOFF_NOVNC_WEB || "",
+    vncDisplay: flags.get("vnc-display") || process.env.BROWSER_HANDOFF_VNC_DISPLAY || defaultVncDisplay(),
+    vncPort: parsePort(flags.get("vnc-port") || process.env.BROWSER_HANDOFF_VNC_PORT || String(defaultVncPort()))
   };
 }
 
@@ -344,6 +444,310 @@ async function resolveBrowserPath(explicitPath) {
   return undefined;
 }
 
+async function findExecutable(explicitPath, names) {
+  if (explicitPath) {
+    return explicitPath;
+  }
+
+  for (const name of names) {
+    try {
+      const { stdout } = await execFileAsync("which", [name], { maxBuffer: 1024 * 64 });
+      const resolved = stdout.trim().split("\n")[0];
+
+      if (resolved) {
+        return resolved;
+      }
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  return "";
+}
+
+async function resolveNoVncWebRoot(explicitPath) {
+  const candidates = explicitPath ? [explicitPath] : NO_VNC_WEB_ROOT_CANDIDATES;
+
+  for (const candidate of candidates) {
+    const resolved = path.resolve(candidate);
+
+    if (await pathExists(path.join(resolved, "vnc.html"))) {
+      return resolved;
+    }
+  }
+
+  return "";
+}
+
+async function resolveVncRuntime(options) {
+  const xvfbPath = await findExecutable(options.xvfbPath, ["Xvfb"]);
+  const x11vncPath = await findExecutable(options.x11vncPath, ["x11vnc"]);
+  const noVncWebRoot = await resolveNoVncWebRoot(options.noVncWebRoot);
+  const missing = [];
+
+  if (!xvfbPath) {
+    missing.push("Xvfb");
+  }
+
+  if (!x11vncPath) {
+    missing.push("x11vnc");
+  }
+
+  if (!noVncWebRoot) {
+    missing.push("noVNC web assets containing vnc.html");
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `VNC control requires missing runtime components: ${missing.join(", ")}. `
+      + "Install/provide them. Expected tools: Xvfb, x11vnc, and a noVNC web root passed with --novnc-web."
+    );
+  }
+
+  options.xvfbPath = xvfbPath;
+  options.x11vncPath = x11vncPath;
+  options.noVncWebRoot = noVncWebRoot;
+
+  return { xvfbPath, x11vncPath, noVncWebRoot };
+}
+
+async function appendLog(logPath, text) {
+  await fs.appendFile(logPath, text).catch(() => {});
+}
+
+function startLoggedProcess(label, command, args, runDir, options = {}) {
+  const logPath = path.join(runDir, `${label}.log`);
+  const child = spawn(command, args, {
+    cwd: process.cwd(),
+    env: options.env ?? process.env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  child.stdout.on("data", (chunk) => {
+    void appendLog(logPath, chunk.toString("utf8"));
+  });
+  child.stderr.on("data", (chunk) => {
+    void appendLog(logPath, chunk.toString("utf8"));
+  });
+  child.on("error", (error) => {
+    void appendLog(logPath, `[error] ${error.message}\n`);
+  });
+  child.on("exit", (code, signal) => {
+    void appendLog(logPath, `[exit] code=${code ?? ""} signal=${signal ?? ""}\n`);
+  });
+
+  return child;
+}
+
+async function waitForDisplay(display, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "";
+
+  while (Date.now() < deadline) {
+    try {
+      await execFileAsync("xdpyinfo", ["-display", display], {
+        env: { ...process.env, DISPLAY: display },
+        maxBuffer: 1024 * 1024 * 4
+      });
+      return;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  throw new Error(`X display ${display} did not become ready. ${lastError}`);
+}
+
+async function waitForTcpPort(port, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "";
+
+  while (Date.now() < deadline) {
+    try {
+      await new Promise((resolve, reject) => {
+        const socket = net.connect({ host: "127.0.0.1", port }, () => {
+          socket.end();
+          resolve();
+        });
+
+        socket.setTimeout(750);
+        socket.on("timeout", () => {
+          socket.destroy(new Error("timeout"));
+        });
+        socket.on("error", reject);
+      });
+      return;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  throw new Error(`TCP port ${port} did not become ready. ${lastError}`);
+}
+
+async function stopChildProcess(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      resolve();
+    }, 2_000);
+
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.kill("SIGTERM");
+  });
+}
+
+function prepareLifecycleOptions(options) {
+  if (!options.expiresAt && options.ttlMs > 0) {
+    options.expiresAt = new Date(Date.now() + options.ttlMs).toISOString();
+  }
+}
+
+function buildStopUrl(controlUrl, token) {
+  if (!controlUrl) {
+    return "";
+  }
+
+  const url = new URL(controlUrl);
+  url.pathname = "/stop";
+
+  if (!url.searchParams.has("token")) {
+    url.searchParams.set("token", token);
+  }
+
+  return url.href;
+}
+
+async function readActiveSessionRecord(activeStatePath) {
+  try {
+    return JSON.parse(await fs.readFile(activeStatePath, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return undefined;
+    }
+
+    throw error;
+  }
+}
+
+async function writeActiveSessionRecord(options, controlUrl = "", status = "running") {
+  if (options.keepPrevious) {
+    return;
+  }
+
+  const record = {
+    activeId: options.activeId,
+    status,
+    targetUrl: options.targetUrl,
+    controlUrl,
+    stopUrl: buildStopUrl(controlUrl, options.token),
+    createdAt: new Date().toISOString(),
+    expiresAt: options.expiresAt || "",
+    artifactsDir: options.artifactsDir,
+    runDir: options.runDir,
+    profileDir: options.profileDir,
+    storageStatePath: options.storageStatePath,
+    controlMode: options.controlMode,
+    deviceName: options.deviceName || undefined,
+    viewport: options.viewport
+  };
+
+  await fs.mkdir(path.dirname(options.activeStatePath), { recursive: true });
+  await fs.writeFile(options.activeStatePath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+}
+
+async function clearActiveSessionIfCurrent(options) {
+  if (options.keepPrevious) {
+    return;
+  }
+
+  const record = await readActiveSessionRecord(options.activeStatePath).catch(() => undefined);
+
+  if (record?.activeId === options.activeId) {
+    await fs.rm(options.activeStatePath, { force: true });
+  }
+}
+
+async function stopPreviousActiveSession(options) {
+  if (options.keepPrevious || options.mode === "serve") {
+    return;
+  }
+
+  const record = await readActiveSessionRecord(options.activeStatePath).catch(() => undefined);
+
+  if (!record?.stopUrl || record.activeId === options.activeId) {
+    return;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5_000);
+
+  try {
+    await fetch(record.stopUrl, {
+      method: "POST",
+      signal: controller.signal
+    });
+  } catch {
+    // Best effort only. The active-session record below still invalidates old handoffs.
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function expirationReason(options) {
+  if (!options.expiresAt) {
+    return "";
+  }
+
+  return Date.now() >= Date.parse(options.expiresAt) ? "expired" : "";
+}
+
+async function inactiveSessionReason(state) {
+  const expired = expirationReason(state.options);
+
+  if (expired) {
+    return expired;
+  }
+
+  if (state.options.keepPrevious) {
+    return "";
+  }
+
+  const record = await readActiveSessionRecord(state.options.activeStatePath).catch(() => undefined);
+
+  if (record?.activeId && record.activeId !== state.options.activeId) {
+    return "replaced";
+  }
+
+  return "";
+}
+
+function scheduleLifecycle(state) {
+  if (state.options.expiresAt) {
+    const delay = Math.max(0, Date.parse(state.options.expiresAt) - Date.now());
+    state.expirationTimer = setTimeout(() => {
+      void closeBrowserAndServer(state);
+    }, delay);
+    state.expirationTimer.unref?.();
+  }
+
+  state.activeCheckTimer = setInterval(async () => {
+    if (await inactiveSessionReason(state)) {
+      await closeBrowserAndServer(state);
+    }
+  }, 5_000);
+  state.activeCheckTimer.unref?.();
+}
+
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
@@ -390,58 +794,6 @@ function normalizeOutcome(value) {
   }
 
   return outcome;
-}
-
-function normalizeButton(button) {
-  if (button === 1 || button === "middle") {
-    return "middle";
-  }
-
-  if (button === 2 || button === "right") {
-    return "right";
-  }
-
-  return "left";
-}
-
-function normalizeKeyName(input) {
-  const key = String(input ?? "");
-  const aliases = new Map([
-    [" ", "Space"],
-    ["Esc", "Escape"],
-    ["Del", "Delete"],
-    ["Left", "ArrowLeft"],
-    ["Right", "ArrowRight"],
-    ["Up", "ArrowUp"],
-    ["Down", "ArrowDown"]
-  ]);
-
-  return aliases.get(key) ?? key;
-}
-
-function buildShortcut(payload) {
-  const key = normalizeKeyName(payload.key);
-  const parts = [];
-
-  if (payload.ctrlKey) {
-    parts.push("Control");
-  }
-
-  if (payload.altKey) {
-    parts.push("Alt");
-  }
-
-  if (payload.shiftKey && key.length !== 1) {
-    parts.push("Shift");
-  }
-
-  if (payload.metaKey) {
-    parts.push("Meta");
-  }
-
-  parts.push(key.length === 1 ? key.toUpperCase() : key);
-
-  return parts.join("+");
 }
 
 function isAuthorized(url, options) {
@@ -523,84 +875,6 @@ async function saveCurrentSession(state, outcomeInput = "continue") {
   return state.lastSave;
 }
 
-async function captureScreenshot(page) {
-  await page.bringToFront().catch(() => {});
-
-  return page.screenshot({
-    type: "jpeg",
-    quality: 72,
-    fullPage: false,
-    timeout: 10_000
-  });
-}
-
-async function sendInput(state, payload) {
-  const page = getActivePage(state.context, state.initialPage);
-  const x = Number(payload.x);
-  const y = Number(payload.y);
-  const hasPoint = Number.isFinite(x) && Number.isFinite(y);
-
-  if (page.isClosed()) {
-    throw new Error("The browser page is closed.");
-  }
-
-  await page.bringToFront().catch(() => {});
-
-  switch (payload.type) {
-    case "pointerdown":
-      if (!hasPoint) {
-        throw new Error("pointerdown requires x and y.");
-      }
-      await page.mouse.move(x, y);
-      await page.mouse.down({ button: normalizeButton(payload.button) });
-      break;
-    case "pointermove":
-      if (!hasPoint) {
-        throw new Error("pointermove requires x and y.");
-      }
-      await page.mouse.move(x, y);
-      break;
-    case "pointerup":
-      if (!hasPoint) {
-        throw new Error("pointerup requires x and y.");
-      }
-      await page.mouse.move(x, y);
-      await page.mouse.up({ button: normalizeButton(payload.button) });
-      break;
-    case "click":
-      if (!hasPoint) {
-        throw new Error("click requires x and y.");
-      }
-      await page.mouse.click(x, y, {
-        button: normalizeButton(payload.button),
-        clickCount: Number(payload.clickCount) || 1,
-        delay: 50
-      });
-      break;
-    case "wheel":
-      await page.mouse.wheel(Number(payload.deltaX) || 0, Number(payload.deltaY) || 0);
-      break;
-    case "key": {
-      const key = String(payload.key ?? "");
-
-      if (key.length === 1 && !payload.ctrlKey && !payload.altKey && !payload.metaKey) {
-        await page.keyboard.type(key);
-      } else {
-        await page.keyboard.press(buildShortcut(payload));
-      }
-      break;
-    }
-    case "text":
-      await page.keyboard.type(String(payload.text ?? ""));
-      break;
-    case "reload":
-      await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-      break;
-    default:
-      throw new Error(`Unsupported input type: ${payload.type}`);
-  }
-}
-
 async function gotoUrl(state, destination) {
   let parsed;
 
@@ -621,15 +895,16 @@ async function gotoUrl(state, destination) {
   return page.url();
 }
 
-function remoteControlHtml(options) {
-  const viewport = options.viewport;
+function vncControlHtml(options) {
+  const vncPath = `vnc-ws?token=${encodeURIComponent(options.token)}`;
+  const iframeSrc = `/novnc/vnc.html?autoconnect=1&resize=remote&path=${encodeURIComponent(vncPath)}`;
 
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Browser Handoff</title>
+  <title>Browser Handoff VNC</title>
   <style>
     :root {
       color-scheme: dark;
@@ -651,41 +926,30 @@ function remoteControlHtml(options) {
     }
 
     .toolbar {
-      display: grid;
-      grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 360px) auto auto auto auto;
+      display: flex;
       gap: 8px;
       align-items: center;
       padding: 8px 10px;
       border-bottom: 1px solid #273440;
       background: #17212a;
+      flex-wrap: wrap;
     }
 
-    .url {
-      min-width: 0;
-      overflow: hidden;
-      white-space: nowrap;
-      text-overflow: ellipsis;
-      font-size: 13px;
-      color: #bfd0dd;
-    }
-
-    button, input {
+    button, a {
       height: 32px;
       border: 1px solid #3b4d5c;
       border-radius: 6px;
       padding: 0 10px;
-      background: #101820;
+      background: #22313b;
       color: #eef3f7;
       font: inherit;
       font-size: 13px;
-    }
-
-    button {
+      line-height: 30px;
+      text-decoration: none;
       cursor: pointer;
-      background: #22313b;
     }
 
-    button:hover {
+    button:hover, a:hover {
       background: #2d3d48;
     }
 
@@ -694,86 +958,37 @@ function remoteControlHtml(options) {
       opacity: 0.65;
     }
 
-    .stage {
-      min-height: 0;
-      display: grid;
-      place-items: center;
-      overflow: auto;
-      background: #080c10;
-    }
-
-    #screen {
-      display: block;
-      width: min(100vw, calc(100vh * ${viewport.width / viewport.height}));
-      max-width: 100vw;
-      height: auto;
-      aspect-ratio: ${viewport.width} / ${viewport.height};
-      background: #050708;
-      cursor: crosshair;
-      user-select: none;
-      -webkit-user-drag: none;
-    }
-
     .status {
+      margin-left: auto;
       font-size: 12px;
       color: #9fb0bc;
     }
 
-    @media (max-width: 900px) {
-      .toolbar {
-        grid-template-columns: 1fr 1fr;
-      }
-
-      .url, #gotoInput, .status {
-        grid-column: 1 / -1;
-      }
+    iframe {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #050708;
     }
   </style>
 </head>
 <body>
   <div class="toolbar">
-    <div id="url" class="url">Loading...</div>
-    <button id="reload" type="button">Reload</button>
-    <input id="gotoInput" type="url" autocomplete="off" placeholder="Go to URL">
-    <button id="gotoButton" type="button">Go</button>
-    <input id="textInput" type="text" autocomplete="off" placeholder="Text to type">
-    <button id="sendText" type="button">Send Text</button>
     <button id="continueSave" type="button">Continue & Save</button>
     <button id="saveLater" type="button">Save for Later</button>
     <button id="cancel" type="button">Cancel</button>
     <button id="stop" type="button">Stop</button>
+    <a href="${iframeSrc}" target="_blank" rel="noopener noreferrer">Open noVNC</a>
     <div id="status" class="status">Connected</div>
   </div>
-  <main class="stage">
-    <img id="screen" alt="Remote browser screen" draggable="false" src="/stream?token=${options.token}">
-  </main>
+  <iframe src="${iframeSrc}" title="Remote browser"></iframe>
   <script>
     const token = ${JSON.stringify(options.token)};
-    const viewport = ${JSON.stringify(options.viewport)};
-    const screen = document.getElementById("screen");
     const statusEl = document.getElementById("status");
-    const urlEl = document.getElementById("url");
-    const reloadButton = document.getElementById("reload");
-    const gotoInput = document.getElementById("gotoInput");
-    const gotoButton = document.getElementById("gotoButton");
-    const textInput = document.getElementById("textInput");
-    const sendTextButton = document.getElementById("sendText");
     const continueSaveButton = document.getElementById("continueSave");
     const saveLaterButton = document.getElementById("saveLater");
     const cancelButton = document.getElementById("cancel");
     const stopButton = document.getElementById("stop");
-    let pointerIsDown = false;
-    let pointerStart = null;
-    let dragStarted = false;
-    let lastPointerMoveAt = 0;
-    let inputQueue = Promise.resolve();
-
-    function pointFromEvent(event) {
-      const rect = screen.getBoundingClientRect();
-      const x = Math.max(0, Math.min(viewport.width, ((event.clientX - rect.left) / rect.width) * viewport.width));
-      const y = Math.max(0, Math.min(viewport.height, ((event.clientY - rect.top) / rect.height) * viewport.height));
-      return { x, y };
-    }
 
     async function postJson(path, payload = {}) {
       const response = await fetch(path + "?token=" + encodeURIComponent(token), {
@@ -791,157 +1006,11 @@ function remoteControlHtml(options) {
       return body;
     }
 
-    function reportError(error) {
-      statusEl.textContent = error.message || String(error);
-    }
-
     function setOutcomeButtonsDisabled(disabled) {
       continueSaveButton.disabled = disabled;
       saveLaterButton.disabled = disabled;
       cancelButton.disabled = disabled;
     }
-
-    function queueInput(payload) {
-      inputQueue = inputQueue
-        .catch(() => {})
-        .then(() => postJson("/input", payload))
-        .catch(reportError);
-      return inputQueue;
-    }
-
-    screen.addEventListener("pointerdown", (event) => {
-      event.preventDefault();
-      screen.setPointerCapture(event.pointerId);
-      pointerIsDown = true;
-      pointerStart = { button: event.button, point: pointFromEvent(event) };
-      dragStarted = false;
-    });
-
-    screen.addEventListener("pointermove", (event) => {
-      if (!pointerIsDown) {
-        return;
-      }
-
-      const point = pointFromEvent(event);
-      const distance = pointerStart
-        ? Math.hypot(point.x - pointerStart.point.x, point.y - pointerStart.point.y)
-        : 0;
-
-      if (!dragStarted && distance > 5 && pointerStart) {
-        dragStarted = true;
-        queueInput({ type: "pointerdown", button: pointerStart.button, ...pointerStart.point });
-      }
-
-      if (!dragStarted) {
-        return;
-      }
-
-      const now = Date.now();
-
-      if (now - lastPointerMoveAt < 60) {
-        return;
-      }
-
-      lastPointerMoveAt = now;
-      event.preventDefault();
-      queueInput({ type: "pointermove", ...point });
-    });
-
-    screen.addEventListener("pointerup", (event) => {
-      event.preventDefault();
-      pointerIsDown = false;
-      const point = pointFromEvent(event);
-
-      if (dragStarted) {
-        queueInput({ type: "pointerup", button: pointerStart?.button ?? event.button, ...point });
-      } else {
-        queueInput({ type: "click", button: pointerStart?.button ?? event.button, ...point });
-      }
-
-      pointerStart = null;
-      dragStarted = false;
-    });
-
-    screen.addEventListener("wheel", async (event) => {
-      event.preventDefault();
-      try {
-        await postJson("/input", { type: "wheel", deltaX: event.deltaX, deltaY: event.deltaY });
-      } catch (error) {
-        reportError(error);
-      }
-    }, { passive: false });
-
-    window.addEventListener("keydown", async (event) => {
-      if (event.target && ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(event.target.tagName)) {
-        return;
-      }
-
-      event.preventDefault();
-      try {
-        await postJson("/input", {
-          type: "key",
-          key: event.key,
-          ctrlKey: event.ctrlKey,
-          altKey: event.altKey,
-          shiftKey: event.shiftKey,
-          metaKey: event.metaKey
-        });
-      } catch (error) {
-        reportError(error);
-      }
-    });
-
-    reloadButton.addEventListener("click", async () => {
-      reloadButton.disabled = true;
-      try {
-        await postJson("/input", { type: "reload" });
-      } catch (error) {
-        reportError(error);
-      } finally {
-        reloadButton.disabled = false;
-      }
-    });
-
-    gotoButton.addEventListener("click", async () => {
-      const url = gotoInput.value.trim();
-      if (!url) {
-        return;
-      }
-      gotoButton.disabled = true;
-      try {
-        const payload = await postJson("/goto", { url });
-        urlEl.textContent = payload.currentUrl || url;
-        statusEl.textContent = "Navigated";
-      } catch (error) {
-        reportError(error);
-      } finally {
-        gotoButton.disabled = false;
-      }
-    });
-
-    gotoInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        gotoButton.click();
-      }
-    });
-
-    sendTextButton.addEventListener("click", () => {
-      const text = textInput.value;
-      if (!text) {
-        return;
-      }
-      queueInput({ type: "text", text });
-      textInput.value = "";
-      screen.focus();
-    });
-
-    textInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        sendTextButton.click();
-      }
-    });
 
     async function saveOutcome(outcome, label) {
       setOutcomeButtonsDisabled(true);
@@ -953,9 +1022,8 @@ function remoteControlHtml(options) {
           : payload.outcome === "save_later"
             ? "Saved for later"
             : "Canceled";
-        urlEl.textContent = payload.currentUrl || urlEl.textContent;
       } catch (error) {
-        reportError(error);
+        statusEl.textContent = error.message || String(error);
         setOutcomeButtonsDisabled(false);
       }
     }
@@ -963,7 +1031,6 @@ function remoteControlHtml(options) {
     continueSaveButton.addEventListener("click", () => saveOutcome("continue", "Saving for continue..."));
     saveLaterButton.addEventListener("click", () => saveOutcome("save_later", "Saving for later..."));
     cancelButton.addEventListener("click", () => saveOutcome("cancel", "Canceling..."));
-
     stopButton.addEventListener("click", async () => {
       stopButton.disabled = true;
       statusEl.textContent = "Stopping...";
@@ -971,35 +1038,61 @@ function remoteControlHtml(options) {
         await postJson("/stop");
         statusEl.textContent = "Stopped";
       } catch (error) {
-        reportError(error);
+        statusEl.textContent = error.message || String(error);
         stopButton.disabled = false;
       }
     });
-
-    async function refreshStatus() {
-      try {
-        const response = await fetch("/status?token=" + encodeURIComponent(token));
-        const payload = await response.json();
-        if (response.ok) {
-          urlEl.textContent = payload.url || "about:blank";
-          statusEl.textContent = payload.outcome === "continue"
-            ? "Saved; agent may continue"
-            : payload.outcome === "save_later"
-              ? "Saved for later"
-              : payload.outcome === "cancel"
-                ? "Canceled"
-                : "Connected";
-        }
-      } catch {
-      } finally {
-        window.setTimeout(refreshStatus, 1500);
-      }
-    }
-
-    refreshStatus();
   </script>
 </body>
 </html>`;
+}
+
+function contentTypeFor(filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  const types = new Map([
+    [".html", "text/html; charset=utf-8"],
+    [".css", "text/css; charset=utf-8"],
+    [".js", "application/javascript; charset=utf-8"],
+    [".mjs", "application/javascript; charset=utf-8"],
+    [".json", "application/json; charset=utf-8"],
+    [".png", "image/png"],
+    [".jpg", "image/jpeg"],
+    [".jpeg", "image/jpeg"],
+    [".svg", "image/svg+xml"],
+    [".ico", "image/x-icon"],
+    [".woff", "font/woff"],
+    [".woff2", "font/woff2"]
+  ]);
+
+  return types.get(extension) ?? "application/octet-stream";
+}
+
+async function serveNoVncAsset(state, url, response) {
+  const root = path.resolve(state.options.noVncWebRoot);
+  const prefix = "/novnc/";
+  const relative = decodeURIComponent(url.pathname.startsWith(prefix)
+    ? url.pathname.slice(prefix.length)
+    : "vnc.html") || "vnc.html";
+  const resolved = path.resolve(root, relative);
+
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
+    sendText(response, 403, "Forbidden\n");
+    return;
+  }
+
+  try {
+    const stat = await fs.stat(resolved);
+    const filePath = stat.isDirectory() ? path.join(resolved, "index.html") : resolved;
+    const body = await fs.readFile(filePath);
+
+    response.writeHead(200, {
+      "content-type": contentTypeFor(filePath),
+      "cache-control": "no-store"
+    });
+    response.end(body);
+  } catch {
+    sendText(response, 404, "Not found\n");
+  }
 }
 
 function createServer(state) {
@@ -1012,42 +1105,37 @@ function createServer(state) {
     }
 
     try {
+      if (!(request.method === "POST" && url.pathname === "/stop")) {
+        const inactiveReason = await inactiveSessionReason(state);
+
+        if (inactiveReason) {
+          sendJson(response, 410, { error: `Browser handoff ${inactiveReason}.` });
+          setTimeout(() => {
+            void closeBrowserAndServer(state);
+          }, 50);
+          return;
+        }
+      }
+
       if (request.method === "GET" && url.pathname === "/") {
         response.writeHead(200, {
           "content-type": "text/html; charset=utf-8",
           "cache-control": "no-store"
         });
-        response.end(remoteControlHtml(state.options));
+        response.end(vncControlHtml(state.options));
         return;
       }
 
-      if (request.method === "GET" && url.pathname === "/stream") {
-        response.writeHead(200, {
-          "content-type": `multipart/x-mixed-replace; boundary=${STREAM_BOUNDARY}`,
-          "cache-control": "no-store, no-cache, must-revalidate, private",
-          "pragma": "no-cache",
-          "connection": "close"
-        });
-
-        while (!response.destroyed && !state.shuttingDown) {
-          const page = getActivePage(state.context, state.initialPage);
-
-          if (page.isClosed()) {
-            break;
-          }
-
-          const frame = await captureScreenshot(page);
-          response.write(`--${STREAM_BOUNDARY}\r\n`);
-          response.write("Content-Type: image/jpeg\r\n");
-          response.write(`Content-Length: ${frame.length}\r\n\r\n`);
-          response.write(frame);
-          response.write("\r\n");
-          await new Promise((resolve) => setTimeout(resolve, Math.max(state.options.frameIntervalMs, 100)));
+      if (request.method === "GET" && url.pathname.startsWith("/novnc/")) {
+        if (state.options.controlMode !== "vnc") {
+          sendText(response, 404, "Not found\n");
+          return;
         }
 
-        response.end();
+        await serveNoVncAsset(state, url, response);
         return;
       }
+
 
       if (request.method === "GET" && url.pathname === "/status") {
         const page = getActivePage(state.context, state.initialPage);
@@ -1056,16 +1144,13 @@ function createServer(state) {
           saved: Boolean(state.lastSave),
           outcome: state.lastSave?.outcome,
           controlState: state.lastSave?.controlState,
-          latest: state.lastSave
+          latest: state.lastSave,
+          activeId: state.options.activeId,
+          expiresAt: state.options.expiresAt || undefined
         });
         return;
       }
 
-      if (request.method === "POST" && url.pathname === "/input") {
-        await sendInput(state, await readJsonBody(request));
-        sendJson(response, 200, { ok: true });
-        return;
-      }
 
       if (request.method === "POST" && url.pathname === "/goto") {
         const payload = await readJsonBody(request);
@@ -1096,14 +1181,191 @@ function createServer(state) {
   });
 }
 
+function encodeWebSocketFrame(payload, opcode = 2) {
+  const body = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+  const length = body.length;
+  let header;
+
+  if (length < 126) {
+    header = Buffer.from([0x80 | opcode, length]);
+  } else if (length <= 0xffff) {
+    header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(length, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x80 | opcode;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(length), 2);
+  }
+
+  return Buffer.concat([header, body]);
+}
+
+function decodeClientWebSocketFrames(buffer) {
+  const frames = [];
+  let offset = 0;
+
+  while (buffer.length - offset >= 2) {
+    const first = buffer[offset];
+    const second = buffer[offset + 1];
+    const opcode = first & 0x0f;
+    const masked = Boolean(second & 0x80);
+    let length = second & 0x7f;
+    let headerLength = 2;
+
+    if (length === 126) {
+      if (buffer.length - offset < 4) {
+        break;
+      }
+
+      length = buffer.readUInt16BE(offset + 2);
+      headerLength = 4;
+    } else if (length === 127) {
+      if (buffer.length - offset < 10) {
+        break;
+      }
+
+      const bigLength = buffer.readBigUInt64BE(offset + 2);
+
+      if (bigLength > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new Error("WebSocket frame is too large.");
+      }
+
+      length = Number(bigLength);
+      headerLength = 10;
+    }
+
+    const maskLength = masked ? 4 : 0;
+    const frameLength = headerLength + maskLength + length;
+
+    if (buffer.length - offset < frameLength) {
+      break;
+    }
+
+    const maskOffset = offset + headerLength;
+    const payloadOffset = maskOffset + maskLength;
+    const payload = Buffer.from(buffer.subarray(payloadOffset, payloadOffset + length));
+
+    if (masked) {
+      const mask = buffer.subarray(maskOffset, maskOffset + 4);
+
+      for (let index = 0; index < payload.length; index += 1) {
+        payload[index] ^= mask[index % 4];
+      }
+    }
+
+    frames.push({ opcode, payload });
+    offset += frameLength;
+  }
+
+  return { frames, remaining: buffer.subarray(offset) };
+}
+
+function rejectUpgrade(socket, statusCode, message) {
+  socket.write(`HTTP/1.1 ${statusCode} ${message}\r\nConnection: close\r\n\r\n`);
+  socket.destroy();
+}
+
+function attachVncWebSocketProxy(server, state) {
+  server.on("upgrade", (request, socket, head) => {
+    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+
+    if (url.pathname !== VNC_WEBSOCKET_PATH) {
+      rejectUpgrade(socket, 404, "Not Found");
+      return;
+    }
+
+    if (!isAuthorized(url, state.options)) {
+      rejectUpgrade(socket, 401, "Unauthorized");
+      return;
+    }
+
+    const key = request.headers["sec-websocket-key"];
+
+    if (typeof key !== "string") {
+      rejectUpgrade(socket, 400, "Bad Request");
+      return;
+    }
+
+    const accept = crypto
+      .createHash("sha1")
+      .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+      .digest("base64");
+    const vncSocket = net.connect({ host: "127.0.0.1", port: state.options.vncPort });
+    let pending = Buffer.from(head);
+
+    socket.write(
+      "HTTP/1.1 101 Switching Protocols\r\n"
+      + "Upgrade: websocket\r\n"
+      + "Connection: Upgrade\r\n"
+      + `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
+    );
+
+    socket.on("data", (chunk) => {
+      pending = Buffer.concat([pending, chunk]);
+
+      try {
+        const decoded = decodeClientWebSocketFrames(pending);
+        pending = decoded.remaining;
+
+        for (const frame of decoded.frames) {
+          if (frame.opcode === 8) {
+            socket.end(encodeWebSocketFrame(frame.payload, 8));
+            vncSocket.end();
+            return;
+          }
+
+          if (frame.opcode === 9) {
+            socket.write(encodeWebSocketFrame(frame.payload, 10));
+            continue;
+          }
+
+          if (frame.opcode === 1 || frame.opcode === 2 || frame.opcode === 0) {
+            vncSocket.write(frame.payload);
+          }
+        }
+      } catch {
+        socket.destroy();
+        vncSocket.destroy();
+      }
+    });
+
+    vncSocket.on("data", (chunk) => {
+      socket.write(encodeWebSocketFrame(chunk, 2));
+    });
+    vncSocket.on("error", () => {
+      socket.destroy();
+    });
+    vncSocket.on("close", () => {
+      socket.end();
+    });
+    socket.on("error", () => {
+      vncSocket.destroy();
+    });
+    socket.on("close", () => {
+      vncSocket.destroy();
+    });
+  });
+}
+
 async function closeBrowserAndServer(state) {
   if (state.shuttingDown) {
     return;
   }
 
   state.shuttingDown = true;
+  clearTimeout(state.expirationTimer);
+  clearInterval(state.activeCheckTimer);
   state.server?.close();
   await state.context?.close().catch(() => {});
+
+  for (const child of [...(state.childProcesses ?? [])].reverse()) {
+    await stopChildProcess(child);
+  }
+
+  await clearActiveSessionIfCurrent(state.options);
 }
 
 function buildServiceCommand(options) {
@@ -1117,6 +1379,14 @@ function buildServiceCommand(options) {
     "127.0.0.1",
     "--token",
     options.token,
+    "--control",
+    options.controlMode,
+    "--active-id",
+    options.activeId,
+    "--active-state",
+    options.activeStatePath,
+    "--ttl-minutes",
+    String(options.ttlMinutes),
     "--artifacts-dir",
     options.artifactsDir,
     "--profile-dir",
@@ -1125,14 +1395,40 @@ function buildServiceCommand(options) {
     options.storageStatePath,
     "--headless",
     options.headless ? "1" : "0",
-    "--frame-interval-ms",
-    String(options.frameIntervalMs),
     "--slow-mo",
     String(Number.isFinite(options.slowMo) ? options.slowMo : 50)
   ];
 
+  if (options.expiresAt) {
+    command.push("--expires-at", options.expiresAt);
+  }
+
+  if (options.keepPrevious) {
+    command.push("--keep-previous");
+  }
+
   if (options.browserPath) {
     command.push("--browser-path", options.browserPath);
+  }
+
+  if (options.xvfbPath) {
+    command.push("--xvfb", options.xvfbPath);
+  }
+
+  if (options.x11vncPath) {
+    command.push("--x11vnc", options.x11vncPath);
+  }
+
+  if (options.noVncWebRoot) {
+    command.push("--novnc-web", options.noVncWebRoot);
+  }
+
+  if (options.vncDisplay) {
+    command.push("--vnc-display", options.vncDisplay);
+  }
+
+  if (options.vncPort) {
+    command.push("--vnc-port", String(options.vncPort));
   }
 
   if (options.deviceName) {
@@ -1222,6 +1518,10 @@ function buildBrowserOptions(playwright, options, executablePath) {
 }
 
 async function deployControlUrl(options) {
+  if (options.controlMode === "vnc") {
+    await resolveVncRuntime(options);
+  }
+
   const deployDir = path.join(options.artifactsDir, "deploy", options.subdomain);
   const manifestPath = path.join(deployDir, "website.json");
   const manifest = [
@@ -1255,6 +1555,7 @@ async function deployControlUrl(options) {
     artifactsDir: options.artifactsDir,
     profileDir: options.profileDir,
     storageStatePath: options.storageStatePath,
+    controlMode: options.controlMode,
     deviceName: options.deviceName || undefined,
     viewport: options.viewportWasExplicit ? options.viewport : undefined
   };
@@ -1265,99 +1566,190 @@ async function deployControlUrl(options) {
   console.log(`Artifacts: ${options.artifactsDir}`);
   console.log(`Profile: ${options.profileDir}`);
   console.log(`Storage state: ${options.storageStatePath}`);
+  console.log(`Control: ${options.controlMode}`);
+  console.log(`Expires: ${options.expiresAt || "disabled"}`);
   if (options.deviceName) {
     console.log(`Device: ${options.deviceName}`);
   } else if (options.viewportWasExplicit) {
     console.log(`Viewport: ${options.viewport.width}x${options.viewport.height}`);
   }
   console.log("After sending the Control URL, end the agent turn. Resume only when the user messages back, then read artifacts/browser-handoff/latest.json.");
+
+  return controlUrl;
 }
 
-async function runBrowserServer(options) {
+async function runVncBrowserServer(options) {
   await fs.mkdir(options.runDir, { recursive: true });
   await fs.mkdir(options.profileDir, { recursive: true });
+  await resolveVncRuntime(options);
+
   const playwright = await loadPlaywright();
   const executablePath = await resolveBrowserPath(options.browserPath);
   const browserOptions = buildBrowserOptions(playwright, options, executablePath);
+  const childProcesses = [];
+  let context;
+
+  browserOptions.headless = false;
   options.viewport = browserOptions.viewport ?? options.viewport;
-  const context = await playwright.chromium.launchPersistentContext(options.profileDir, browserOptions);
-  const initialPage = getActivePage(context, undefined) ?? await context.newPage();
-  const state = {
-    options,
-    context,
-    initialPage,
-    server: undefined,
-    shuttingDown: false,
-    lastSave: undefined
-  };
 
-  context.on("response", async (browserResponse) => {
-    const line = `${browserResponse.status()} ${browserResponse.url()}\n`;
-    await fs.appendFile(path.join(options.runDir, "network.log"), line).catch(() => {});
-  });
+  try {
+    const xvfb = startLoggedProcess(
+      "xvfb",
+      options.xvfbPath,
+      [
+        options.vncDisplay,
+        "-screen",
+        "0",
+        `${options.viewport.width}x${options.viewport.height}x24`,
+        "-nolisten",
+        "tcp"
+      ],
+      options.runDir
+    );
+    childProcesses.push(xvfb);
+    await waitForDisplay(options.vncDisplay);
 
-  context.on("page", (page) => {
-    page.on("console", async (message) => {
+    const x11vnc = startLoggedProcess(
+      "x11vnc",
+      options.x11vncPath,
+      [
+        "-display",
+        options.vncDisplay,
+        "-rfbport",
+        String(options.vncPort),
+        "-localhost",
+        "-forever",
+        "-shared",
+        "-nopw",
+        "-quiet"
+      ],
+      options.runDir,
+      { env: { ...process.env, DISPLAY: options.vncDisplay } }
+    );
+    childProcesses.push(x11vnc);
+    await waitForTcpPort(options.vncPort);
+
+    browserOptions.env = { ...process.env, DISPLAY: options.vncDisplay };
+    context = await playwright.chromium.launchPersistentContext(options.profileDir, browserOptions);
+    const initialPage = getActivePage(context, undefined) ?? await context.newPage();
+    const state = {
+      options,
+      context,
+      initialPage,
+      server: undefined,
+      shuttingDown: false,
+      lastSave: undefined,
+      childProcesses
+    };
+
+    context.on("response", async (browserResponse) => {
+      const line = `${browserResponse.status()} ${browserResponse.url()}\n`;
+      await fs.appendFile(path.join(options.runDir, "network.log"), line).catch(() => {});
+    });
+
+    context.on("page", (page) => {
+      page.on("console", async (message) => {
+        const line = `[browser:${message.type()}] ${message.text()}\n`;
+        await fs.appendFile(path.join(options.runDir, "browser-console.log"), line).catch(() => {});
+      });
+    });
+
+    initialPage.on("console", async (message) => {
       const line = `[browser:${message.type()}] ${message.text()}\n`;
       await fs.appendFile(path.join(options.runDir, "browser-console.log"), line).catch(() => {});
     });
-  });
 
-  initialPage.on("console", async (message) => {
-    const line = `[browser:${message.type()}] ${message.text()}\n`;
-    await fs.appendFile(path.join(options.runDir, "browser-console.log"), line).catch(() => {});
-  });
+    await initialPage.goto(options.targetUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    await settlePage(initialPage);
+    await fs.writeFile(path.join(options.runDir, "initial.html"), await initialPage.content(), "utf8");
+    await fs.writeFile(path.join(options.runDir, "initial-url.txt"), `${initialPage.url()}\n`, "utf8");
+    await initialPage.screenshot({
+      path: path.join(options.runDir, "initial.png"),
+      fullPage: true,
+      animations: "disabled",
+      timeout: 30_000
+    }).catch(() => {});
 
-  await initialPage.goto(options.targetUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await settlePage(initialPage);
-  await fs.writeFile(path.join(options.runDir, "initial.html"), await initialPage.content(), "utf8");
-  await fs.writeFile(path.join(options.runDir, "initial-url.txt"), `${initialPage.url()}\n`, "utf8");
-  await initialPage.screenshot({
-    path: path.join(options.runDir, "initial.png"),
-    fullPage: true,
-    animations: "disabled",
-    timeout: 30_000
-  }).catch(() => {});
+    const server = createServer(state);
+    state.server = server;
+    attachVncWebSocketProxy(server, state);
+    scheduleLifecycle(state);
 
-  const server = createServer(state);
-  state.server = server;
+    server.listen(options.port, options.host, () => {
+      const displayHost = options.host === "0.0.0.0" ? "127.0.0.1" : options.host;
+      const controlUrl = `http://${displayHost}:${options.port}/?token=${encodeURIComponent(options.token)}`;
 
-  server.listen(options.port, options.host, () => {
-    const displayHost = options.host === "0.0.0.0" ? "127.0.0.1" : options.host;
-    const controlUrl = `http://${displayHost}:${options.port}/?token=${encodeURIComponent(options.token)}`;
+      console.log(`Opened: ${options.targetUrl}`);
+      console.log(`Control URL: ${controlUrl}`);
+      console.log(`Artifacts: ${options.runDir}`);
+      console.log(`Profile: ${options.profileDir}`);
+      console.log(`Storage state: ${options.storageStatePath}`);
+      console.log("Control: vnc");
+      console.log(`Expires: ${options.expiresAt || "disabled"}`);
+      console.log(`VNC display: ${options.vncDisplay}`);
+      console.log(`VNC port: ${options.vncPort}`);
+      if (options.deviceName) {
+        console.log(`Device: ${options.deviceName}`);
+      } else if (options.viewportWasExplicit) {
+        console.log(`Viewport: ${options.viewport.width}x${options.viewport.height}`);
+      }
+      console.log("After sending the Control URL, end the agent turn. Resume only when the user messages back.");
+      console.log("Press Ctrl+C or click Stop in the browser UI to close the handoff.");
 
-    console.log(`Opened: ${options.targetUrl}`);
-    console.log(`Control URL: ${controlUrl}`);
-    console.log(`Artifacts: ${options.runDir}`);
-    console.log(`Profile: ${options.profileDir}`);
-    console.log(`Storage state: ${options.storageStatePath}`);
-    if (options.deviceName) {
-      console.log(`Device: ${options.deviceName}`);
-    } else if (options.viewportWasExplicit) {
-      console.log(`Viewport: ${options.viewport.width}x${options.viewport.height}`);
+      if (options.mode === "local") {
+        void writeActiveSessionRecord(options, controlUrl, "running").catch((error) => {
+          console.error(`Failed to write active-session record: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
+    });
+
+    process.on("SIGINT", async () => {
+      console.log("\nClosing browser handoff...");
+      await closeBrowserAndServer(state);
+      process.exit(0);
+    });
+
+    process.on("SIGTERM", async () => {
+      await closeBrowserAndServer(state);
+      process.exit(0);
+    });
+  } catch (error) {
+    await context?.close().catch(() => {});
+
+    for (const child of [...childProcesses].reverse()) {
+      await stopChildProcess(child);
     }
-    console.log("After sending the Control URL, end the agent turn. Resume only when the user messages back.");
-    console.log("Press Ctrl+C or click Stop in the browser UI to close the handoff.");
-  });
 
-  process.on("SIGINT", async () => {
-    console.log("\nClosing browser handoff...");
-    await closeBrowserAndServer(state);
-    process.exit(0);
-  });
+    throw error;
+  }
+}
 
-  process.on("SIGTERM", async () => {
-    await closeBrowserAndServer(state);
-    process.exit(0);
-  });
+async function runBrowserServer(options) {
+  await runVncBrowserServer(options);
 }
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  prepareLifecycleOptions(options);
 
   if (options.mode === "deploy") {
-    await deployControlUrl(options);
+    await stopPreviousActiveSession(options);
+    await writeActiveSessionRecord(options, "", "starting");
+
+    try {
+      const controlUrl = await deployControlUrl(options);
+      await writeActiveSessionRecord(options, controlUrl, "running");
+    } catch (error) {
+      await clearActiveSessionIfCurrent(options);
+      throw error;
+    }
+
     return;
+  }
+
+  if (options.mode === "local") {
+    await stopPreviousActiveSession(options);
+    await writeActiveSessionRecord(options, "", "starting");
   }
 
   await runBrowserServer(options);
