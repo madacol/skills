@@ -11,7 +11,7 @@ Use the bundled helper when a browsing task reaches a step that is easier or saf
 node /home/mada/.agents/skills/browser-handoff/scripts/browser-handoff.mjs "https://example.com"
 ```
 
-The helper owns the operational defaults: deployed token URL, VNC/noVNC, 30-minute TTL, workspace artifacts/profile/storage, stable cached subdomain, runtime preflight, stale Chromium cleanup, and active-session records. Do not pass extra flags during normal use.
+The helper owns the operational defaults: one stable token-protected gateway, VNC/noVNC, a 30-minute session TTL, runtime preflight, temporary browser state, and exact-session agent continuation. Do not pass extra flags during normal use.
 
 For high-sensitivity sites such as government identity portals, tax portals, banking, healthcare, immigration, or any flow involving identity credentials, documents, payments, or other sensitive personal data, do not create a browser handoff until the user has explicitly approved the risk that the session is controlled through a private token URL on an external deployment domain. If that approval is not available or the request is blocked, guide the user through their own browser instead.
 
@@ -19,10 +19,11 @@ Default behavior:
 
 - Uses a desktop Chromium session exposed through VNC/noVNC.
 - The embedded noVNC view uses local scaling so the remote desktop fits phone screens. Pinch inside noVNC is passed to the remote browser; pinch on the toolbar or bottom zoom strip changes the local handoff-page zoom for the whole interface.
-- Deploys a private token URL and prints only the user-facing `Control URL`.
-- Stops the previously active handoff before creating a new default handoff.
+- Reuses one private gateway URL and prints only the user-facing `Control URL`.
+- Allows up to four isolated sessions at once; ending one session does not affect the others.
 - Self-closes after 30 minutes unless `--ttl-minutes` changes the TTL.
-- Persists browser state under the workspace `artifacts/browser-handoff` defaults and reuses stable workspace defaults on future runs.
+- Keeps the Chromium profile and control records under `/tmp/browser-handoff` only while the session is live.
+- Deletes the session profile, records, locks, and browser processes on Stop, Cancel, TTL, startup failure, or worker exit.
 
 For a mobile site or mobile verification flow, use a Playwright device profile:
 
@@ -32,15 +33,21 @@ node /home/mada/.agents/skills/browser-handoff/scripts/browser-handoff.mjs "http
 
 Send the printed `Control URL` to the user only after verifying it. Say what page is open, what they need to do, and what you will do after they click Continue. Then end the turn.
 
-The helper must not print a `Control URL` unless local preflight confirms the runtime dependencies needed by the deployed service, including Playwright and a usable Chromium executable. If the helper fails before printing the URL, report the concrete preflight error instead of retrying blindly. A missing `latest.json` before the user clicks Continue/Save is normal; it is not evidence by itself that deployment failed.
+The helper must not print a `Control URL` unless local preflight confirms Playwright, Chromium, and the VNC runtime. If it fails, report the concrete error instead of retrying blindly; three rapid worker-start failures open a one-minute circuit breaker.
 
 Do not manually inspect Playwright installs, browser cache revisions, or deployment registry state before normal use. The helper owns those preflight and recovery details. Only pass runtime override flags such as `--playwright-require-from` after the helper reports a concrete failure that requires an override.
 
-Do not poll, sleep-loop, monitor, or keep the agent turn open while the user has control. Resume only after the user sends a follow-up message such as “continue”, asks for status, or gives new direction. At that point, read `artifacts/browser-handoff/latest.json` in the workspace that launched the helper, then reconnect to the same live Chromium session through the active-state path it records:
+Do not poll, sleep-loop, monitor, or keep the agent turn open while the user has control. Resume only after the user sends a follow-up message such as “continue”, asks for status, or gives new direction. Then reconnect through the temporary active-session record. With one live handoff, the helper finds it automatically:
+
+```bash
+node /home/mada/.agents/skills/browser-handoff/scripts/browser-handoff.mjs resume inspect
+```
+
+With concurrent handoffs, pass the `Active state` path printed when that handoff was created:
 
 ```bash
 node /home/mada/.agents/skills/browser-handoff/scripts/browser-handoff.mjs resume inspect \
-  --active-state <activeStatePath-from-latest.json>
+  --active-state <path>
 ```
 
 Continue browsing with `resume goto <url>`, `resume click <selector>`, `resume fill <selector> <text>`, `resume press <selector> <key>`, and `resume screenshot [path]`. Every command reconnects to the same live browser and leaves it running.
@@ -48,36 +55,34 @@ Continue browsing with `resume goto <url>`, `resume click <selector>`, `resume f
 Outcomes:
 
 - `continue`: reconnect through the recorded active-state path, verify the page reflects the expected result, and continue from the same live browser state.
-- `save_later`: keep the session and stay paused.
-- `cancel`: stop the task unless the user gives new direction.
+- `save_later`: keep the live temporary session and stay paused until its TTL.
+- `cancel`: stop the task and delete the temporary session.
 
 Treat the user’s continue signal as a control boundary, not proof that the web action succeeded. Verify the page state before continuing.
 
 ## Behavior
 
 - The control UI supports VNC browser control, continue/save, save for later, cancel, and stop.
-- Saves write the selected outcome, screenshot, page HTML, current URL, visible links, storage state, and continuity metadata.
-- The active-session record lives beside the artifact root and lets a newer handoff invalidate an older one.
-- The active-session record contains a loopback-only CDP endpoint used by the `resume` commands; `latest.json` points the next agent to that record.
-- The default TTL is enforced by the running handoff process itself; no cron or at-job is required.
-- If the live session is lost, treat any restored profile as reduced continuity rather than the exact same session.
+- Continue/Save returns the outcome, current URL, active ID, and temporary active-record path without writing screenshots, HTML, storage state, or historical logs.
+- The active record contains a loopback-only CDP endpoint used by the `resume` commands and disappears with the session.
+- The gateway is the only permanent service. It stays idle when no handoff exists and never recreates a terminated session.
+- Each session has its own process group, temporary directory, control capability, and continuation record. Cleanup is scoped to that session.
+- The default TTL is enforced by the temporary worker itself.
+- If the live worker is lost, the session is gone; it is never silently restored or restarted.
 
 ## Advanced flags
 
 Use flags only when the user asks for non-default behavior or the helper reports a concrete failure that requires an override.
 
-- `--ttl-minutes <n>`: auto-close timeout. Defaults to `30`; use `0` to disable. TTL overrides are not remembered as workspace defaults.
-- `--subdomain <name>`: stable deployed subdomain. Defaults to the workspace cached subdomain after the first successful run, otherwise a unique `browser-handoff-*` name.
-- `--artifacts-dir <path>`: artifact root. Defaults to `./artifacts/browser-handoff`.
-- `--profile-dir <path>`: browser profile directory. Defaults to the workspace cached profile path, otherwise `<artifacts-dir>/profile`.
-- `--storage-state <path>`: storage-state output. Defaults to the workspace cached storage path, otherwise `<artifacts-dir>/storage-state.json`.
-- `--keep-previous`: create a handoff without replacing the previous active handoff. Concurrent handoffs must use distinct `--artifacts-dir` values; concurrent local handoffs also need distinct `--port` values.
+- `--ttl-minutes <n>`: auto-close timeout from 1 to 60 minutes. Defaults to `30`; gateway sessions cannot disable the TTL.
+- `--persist-profile <name>`: explicitly reuse a named Chromium profile across handoffs. Default sessions never persist login state. Profiles are cache-pruned and bounded to three profiles and 512 MB total.
+- `--retain-artifacts`: retain bounded diagnostics explicitly. The gateway keeps at most three directories and 50 MB total; browser profiles and session records are still removed.
 - `--device <name>`: Playwright device profile, such as `iPhone 14` or `Pixel 7`; sets mobile viewport, user agent, touch support, and device scale.
 - `--user-agent <value>`, `--is-mobile <0|1>`, `--has-touch <0|1>`, `--device-scale-factor <n>`: explicit browser emulation overrides.
 - `--viewport <width>x<height>`: desktop viewport override. Default: `1440x960`.
 - `--playwright-require-from <path>`: resolve Playwright from an existing package root or `package.json`, useful when reusing a pinned installation outside the current workspace.
 - `--xvfb <path>`, `--x11vnc <path>`, `--novnc-web <path>`: explicit VNC runtime paths. `--novnc-web` must point to a directory containing `vnc.html`.
 - `--vnc-display <display>`, `--vnc-port <port>`: VNC backend internals; usually leave unset.
-- `--local`: run only a local control server for debugging.
+- `--local`: bypass the gateway and run a local control server for debugging.
 
 Run `--help` for the full helper interface.

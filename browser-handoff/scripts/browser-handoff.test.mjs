@@ -6,6 +6,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import test from "node:test";
+import { gatewaySessionCookie, gatewaySessionRoute, requestCookie } from "./browser-handoff.mjs";
 
 const scriptPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "browser-handoff.mjs");
 const defaultsFile = "defaults.json";
@@ -35,7 +36,7 @@ async function waitFor(condition, timeoutMs = 3_000) {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    if (condition()) {
+    if (await condition()) {
       return true;
     }
 
@@ -234,6 +235,43 @@ function runServeStartup(tmpDir, profileDir, env = {}) {
   );
 }
 
+async function spawnGateway(t, runtimeRoot, port) {
+  const child = spawn(process.execPath, [
+    scriptPath,
+    "gateway",
+    "--local",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    String(port),
+    "--runtime-root",
+    runtimeRoot,
+    "--gateway-secret",
+    "test-gateway-secret"
+  ], { stdio: ["ignore", "pipe", "pipe"] });
+
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+      await waitForChildExit(child);
+    }
+
+    fs.rmSync(runtimeRoot, { force: true, recursive: true });
+  });
+
+  const ready = await waitFor(async () => {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/gateway/health`);
+      return response.status === 200;
+    } catch {
+      return false;
+    }
+  });
+
+  assert.equal(ready, true);
+  return child;
+}
+
 async function waitUntilProcessIsOldEnough(profileDir) {
   assert.equal(await waitFor(() => fakeChromiumIsVisible(profileDir)), true);
   await new Promise((resolve) => setTimeout(resolve, 1_100));
@@ -298,6 +336,117 @@ test("resume reports a missing active session before loading Playwright", () => 
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /No active browser handoff/);
+});
+
+test("resume discovers the only live session record", (t) => {
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "browser-handoff-resume-one-"));
+  const recordPath = path.join(runtimeRoot, "session-a", "active.json");
+
+  t.after(() => fs.rmSync(runtimeRoot, { force: true, recursive: true }));
+  fs.mkdirSync(path.dirname(recordPath), { recursive: true });
+  fs.writeFileSync(recordPath, `${JSON.stringify({ activeId: "session-a", status: "running" })}\n`);
+
+  const result = runWithEnv({ BROWSER_HANDOFF_RUNTIME_ROOT: runtimeRoot }, "resume", "inspect");
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /session-a has no agent continuation endpoint/);
+});
+
+test("resume requires an explicit record when sessions are concurrent", (t) => {
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "browser-handoff-resume-many-"));
+
+  t.after(() => fs.rmSync(runtimeRoot, { force: true, recursive: true }));
+  for (const sessionId of ["session-a", "session-b"]) {
+    const recordPath = path.join(runtimeRoot, sessionId, "active.json");
+    fs.mkdirSync(path.dirname(recordPath), { recursive: true });
+    fs.writeFileSync(recordPath, `${JSON.stringify({ activeId: sessionId, status: "running" })}\n`);
+  }
+
+  const result = runWithEnv({ BROWSER_HANDOFF_RUNTIME_ROOT: runtimeRoot }, "resume", "inspect");
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Multiple browser handoffs are active/);
+  assert.match(result.stderr, /session-a\/active\.json/);
+  assert.match(result.stderr, /session-b\/active\.json/);
+});
+
+test("gateway removes a temporary session after browser startup fails", async (t) => {
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "browser-handoff-gateway-"));
+  const port = await getFreePort();
+  await spawnGateway(t, runtimeRoot, port);
+  const noVncRoot = fs.mkdtempSync(path.join(os.tmpdir(), "browser-handoff-novnc-"));
+  t.after(() => fs.rmSync(noVncRoot, { force: true, recursive: true }));
+  fs.writeFileSync(path.join(noVncRoot, "vnc.html"), "<!doctype html>\n");
+  const failedSession = {
+    protocolVersion: 1,
+    targetUrl: "https://example.com",
+    xvfbPath: "/bin/false",
+    x11vncPath: "/bin/false",
+    noVncWebRoot: noVncRoot
+  };
+
+  const response = await fetch(`http://127.0.0.1:${port}/gateway/sessions`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer test-gateway-secret",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(failedSession)
+  });
+
+  assert.equal(response.status, 500);
+  assert.equal(!fs.existsSync(runtimeRoot) || fs.readdirSync(runtimeRoot).length === 0, true);
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const retry = await fetch(`http://127.0.0.1:${port}/gateway/sessions`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-gateway-secret",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(failedSession)
+    });
+    assert.equal(retry.status, 500);
+  }
+
+  const blocked = await fetch(`http://127.0.0.1:${port}/gateway/sessions`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer test-gateway-secret",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(failedSession)
+  });
+  assert.equal(blocked.status, 503);
+});
+
+test("gateway reports an isolated-session count", async (t) => {
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "browser-handoff-gateway-count-"));
+  const port = await getFreePort();
+  await spawnGateway(t, runtimeRoot, port);
+
+  const response = await fetch(`http://127.0.0.1:${port}/gateway/health`);
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.activeSessions, 0);
+});
+
+test("gateway routing and cookies isolate concurrent browser tabs", () => {
+  const sessions = new Map([
+    ["aaaaaaaaaaaaaaaaaaaaaaaa", { id: "aaaaaaaaaaaaaaaaaaaaaaaa", handle: "handle-a" }],
+    ["bbbbbbbbbbbbbbbbbbbbbbbb", { id: "bbbbbbbbbbbbbbbbbbbbbbbb", handle: "handle-b" }]
+  ]);
+  const routeA = gatewaySessionRoute("/sessions/aaaaaaaaaaaaaaaaaaaaaaaa/stop", sessions);
+  const routeB = gatewaySessionRoute("/sessions/bbbbbbbbbbbbbbbbbbbbbbbb/status", sessions);
+
+  assert.equal(routeA.session.handle, "handle-a");
+  assert.equal(routeA.upstreamPath, "/stop");
+  assert.equal(routeB.session.handle, "handle-b");
+  assert.equal(routeB.upstreamPath, "/status");
+  assert.match(gatewaySessionCookie(routeA, "handle-a"), /Path=\/sessions\/aaaaaaaaaaaaaaaaaaaaaaaa\//);
+  assert.match(gatewaySessionCookie(routeB, "handle-b"), /Path=\/sessions\/bbbbbbbbbbbbbbbbbbbbbbbb\//);
+  assert.equal(requestCookie({ headers: { cookie: "browser_handoff_session=%ZZ" } }, "browser_handoff_session"), "");
 });
 
 test("startup uses workspace defaults without persisting a TTL override", (t) => {

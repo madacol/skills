@@ -15,6 +15,8 @@ import { promisify } from "node:util";
 const DEFAULT_VIEWPORT = { width: 1440, height: 960 };
 const DEFAULT_TTL_MINUTES = 30;
 const DEFAULT_STALE_CHROMIUM_GRACE_MINUTES = 60;
+const DEFAULT_MAX_SESSION_BYTES = 512 * 1024 * 1024;
+const GATEWAY_PROTOCOL_VERSION = 1;
 const DEFAULTS_FILE_NAME = "defaults.json";
 const PROFILE_MARKER_FILE = ".browser-handoff-profile.json";
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
@@ -42,6 +44,9 @@ const execFileAsync = promisify(execFile);
  * activeStatePath: string,
  * continuationStatePath: string,
  * keepPrevious: boolean,
+ * ephemeral: boolean,
+ * retainArtifacts: boolean,
+ * persistProfile: string,
  * ttlMinutes: number,
  * ttlMs: number,
  * expiresAt: string,
@@ -69,6 +74,7 @@ const execFileAsync = promisify(execFile);
  * scriptPath: string,
  * playwrightRequireFrom: string,
  * trustProxyToken: boolean,
+ * publicPath: string,
  * xvfbPath: string,
  * x11vncPath: string,
  * noVncWebRoot: string,
@@ -81,19 +87,20 @@ function usage() {
   browser-handoff.mjs <url> [options]
 
 Default:
-  Deploy a token-protected control page and print the user-facing Control URL.
+  Create an isolated temporary browser through the stable token-protected gateway.
 
 Options:
-  --subdomain <name>            Deployed subdomain. Default: workspace cached value or browser-handoff-<random>
   --local                       Run only a local server for debugging
   --serve                       Internal service mode used by deployment
   --host <host>                 Bind host in --local/--serve. Default: 127.0.0.1
   --port <port>                 Bind port in --local/--serve. Default: PORT or 8787
   --token <token>               Control-page bearer token. Default: random
-  --ttl-minutes <n>             Auto-close timeout. Default: 30. Use 0 to disable; overrides are not cached
+  --ttl-minutes <n>             Auto-close timeout. Gateway range: 1-60; default: 30. Local debugging may use 0
   --expires-at <iso>            Absolute expiration time, used internally by deployed services
-  --active-state <path>         Active-session record. Default: <artifacts-parent>/browser-handoff-active.json
-  --keep-previous               Do not stop the previous handoff; use distinct artifacts and local port
+  --active-state <path>         Active-session record; internal except with --local/--serve
+  --ephemeral                   Internal gateway worker mode; delete all session state on exit
+  --retain-artifacts            Keep bounded diagnostics after the session ends
+  --persist-profile <name>      Reuse a named Chromium profile across handoffs
   --control <vnc>               Control backend. Default: vnc
   --artifacts-dir <path>        Artifact root. Default: ./artifacts/browser-handoff
   --profile-dir <path>          Persistent Chromium profile. Default: workspace cached value or <artifacts-dir>/profile
@@ -146,8 +153,23 @@ function resumeUsage() {
   browser-handoff.mjs resume press <selector> <key> [--active-state <path>] [--playwright-require-from <path>]
   browser-handoff.mjs resume screenshot [path] [--active-state <path>] [--playwright-require-from <path>]
 
-Connects to the Chromium process recorded by the active browser handoff and
-performs one agent action without closing the live browser.
+Connects to the Chromium process recorded by a live browser handoff and performs
+one agent action without closing it. With one live session, its temporary record
+is discovered automatically. With concurrent sessions, --active-state is required.
+`;
+}
+
+function gatewayUsage() {
+  return `Usage:
+  browser-handoff.mjs gateway [options]
+
+Options:
+  --host <host>                 Bind host. Default: 127.0.0.1
+  --port <port>                 Bind port. Default: PORT or 8787
+  --runtime-root <path>         Temporary session root. Default: /tmp/browser-handoff
+  --state-dir <path>            Durable gateway configuration root
+  --gateway-secret <secret>     Bearer secret for session creation
+  --local                       Run the gateway directly for debugging
 `;
 }
 
@@ -301,7 +323,7 @@ function readWorkspaceDefaults(artifactsDir) {
 }
 
 async function writeWorkspaceDefaults(options) {
-  if (options.mode === "serve" || options.keepPrevious) {
+  if (options.mode === "serve" || options.keepPrevious || options.ephemeral) {
     return;
   }
 
@@ -330,7 +352,7 @@ function parseArgs(argv) {
 
   let targetUrl = "";
   const flags = new Map();
-  const booleans = new Set(["allow-external-host", "keep-previous", "local", "serve", "trust-proxy-token"]);
+  const booleans = new Set(["allow-external-host", "ephemeral", "keep-previous", "local", "retain-artifacts", "serve", "trust-proxy-token"]);
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -387,7 +409,8 @@ function parseArgs(argv) {
   );
   const workspaceDefaults = readWorkspaceDefaults(artifactsDir);
   const timestamp = new Date().toISOString().replaceAll(":", "-");
-  const runDir = path.join(artifactsDir, "runs", timestamp);
+  const ephemeral = flags.has("ephemeral");
+  const runDir = ephemeral ? artifactsDir : path.join(artifactsDir, "runs", timestamp);
   const profileDir = path.resolve(
     flags.get("profile-dir")
       || process.env.BROWSER_HANDOFF_PROFILE_DIR
@@ -433,6 +456,9 @@ function parseArgs(argv) {
     activeStatePath,
     continuationStatePath: path.join(artifactsDir, "sessions", `${continuationId}.json`),
     keepPrevious: flags.has("keep-previous") || parseBoolean(process.env.BROWSER_HANDOFF_KEEP_PREVIOUS, false),
+    ephemeral,
+    retainArtifacts: flags.has("retain-artifacts"),
+    persistProfile: flags.get("persist-profile") || "",
     ttlMinutes,
     ttlMs: Math.round(ttlMinutes * 60_000),
     expiresAt,
@@ -465,11 +491,63 @@ function parseArgs(argv) {
       flags.get("playwright-require-from") || process.env.BROWSER_HANDOFF_PLAYWRIGHT_REQUIRE_FROM || ""
     ),
     trustProxyToken: flags.has("trust-proxy-token"),
+    publicPath: flags.get("public-path") || "",
     xvfbPath: flags.get("xvfb") || process.env.BROWSER_HANDOFF_XVFB || "",
     x11vncPath: flags.get("x11vnc") || process.env.BROWSER_HANDOFF_X11VNC || "",
     noVncWebRoot: flags.get("novnc-web") || process.env.BROWSER_HANDOFF_NOVNC_WEB || "",
     vncDisplay: flags.get("vnc-display") || process.env.BROWSER_HANDOFF_VNC_DISPLAY || defaultVncDisplay(),
     vncPort: parsePort(flags.get("vnc-port") || process.env.BROWSER_HANDOFF_VNC_PORT || String(defaultVncPort()))
+  };
+}
+
+function parseGatewayArgs(argv) {
+  const args = [...argv];
+
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(gatewayUsage());
+    process.exit(0);
+  }
+
+  const flags = new Map();
+  const booleans = new Set(["local"]);
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (!arg.startsWith("--")) {
+      fail(`Unexpected gateway argument: ${arg}`);
+    }
+
+    const name = arg.slice(2);
+
+    if (booleans.has(name)) {
+      flags.set(name, "1");
+      continue;
+    }
+
+    const value = args[index + 1];
+
+    if (!value || value.startsWith("--")) {
+      fail(`Missing value for --${name}`);
+    }
+
+    flags.set(name, value);
+    index += 1;
+  }
+
+  const host = flags.get("host") || process.env.BROWSER_HANDOFF_HOST || "127.0.0.1";
+
+  if (!LOOPBACK_HOSTS.has(host)) {
+    fail(`Refusing to bind gateway to non-loopback host "${host}".`);
+  }
+
+  return {
+    host,
+    port: parsePort(flags.get("port") || process.env.PORT || "8787"),
+    runtimeRoot: path.resolve(flags.get("runtime-root") || path.join(os.tmpdir(), "browser-handoff")),
+    stateDirectory: path.resolve(flags.get("state-dir") || gatewayStateDirectory()),
+    secret: flags.get("gateway-secret") || process.env.BROWSER_HANDOFF_GATEWAY_SECRET || "",
+    buildId: flags.get("build-id") || ""
   };
 }
 
@@ -483,11 +561,7 @@ function parseResumeArgs(argv) {
 
   const action = args.shift() || "inspect";
   const positional = [];
-  let activeStatePath = process.env.BROWSER_HANDOFF_ACTIVE_STATE || path.resolve(
-    process.cwd(),
-    "artifacts",
-    "browser-handoff-active.json"
-  );
+  let activeStatePath = process.env.BROWSER_HANDOFF_ACTIVE_STATE || "";
   let playwrightRequireFrom = requirePathFrom(process.env.BROWSER_HANDOFF_PLAYWRIGHT_REQUIRE_FROM || "");
 
   for (let index = 0; index < args.length; index += 1) {
@@ -1216,8 +1290,12 @@ function startLoggedProcess(label, command, args, runDir, options = {}) {
   const child = spawn(command, args, {
     cwd: process.cwd(),
     env: options.env ?? process.env,
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: options.ephemeral ? "ignore" : ["ignore", "pipe", "pipe"]
   });
+
+  if (options.ephemeral) {
+    return child;
+  }
 
   child.stdout.on("data", (chunk) => {
     void appendLog(logPath, chunk.toString("utf8"));
@@ -1637,6 +1715,18 @@ function scheduleLifecycle(state) {
 
     if (inactiveReason) {
       await terminalizeBrowserSession(state, inactiveReason);
+      return;
+    }
+
+    if (state.options.ephemeral) {
+      const artifactBytes = await directorySize(state.options.artifactsDir);
+      const profileBytes = pathContains(state.options.artifactsDir, state.options.profileDir)
+        ? 0
+        : await directorySize(state.options.profileDir);
+
+      if (artifactBytes + profileBytes > DEFAULT_MAX_SESSION_BYTES) {
+        await terminalizeBrowserSession(state, "resource_limit");
+      }
     }
   }, 5_000);
   state.activeCheckTimer.unref?.();
@@ -1728,6 +1818,31 @@ async function saveCurrentSession(state, outcomeInput = "continue") {
     throw new Error("Cannot save because the active page is closed.");
   }
 
+  if (state.options.ephemeral && !state.options.retainArtifacts) {
+    await settlePage(page);
+    const savedAt = new Date().toISOString();
+
+    state.lastSave = {
+      savedAt,
+      outcome,
+      continuity: "live_session",
+      controlState: outcome === "continue" ? "ready_for_agent" : outcome === "save_later" ? "suspended" : "canceled",
+      activeId: state.options.activeId,
+      activeStatePath: state.options.activeStatePath,
+      currentUrl: page.url()
+    };
+    await touchSessionActivity(state.options, {
+      lastActivityAt: savedAt,
+      status: outcome === "cancel" ? "stopped" : "running"
+    });
+
+    if (outcome === "cancel") {
+      setTimeout(() => void terminalizeBrowserSession(state, "canceled"), 50);
+    }
+
+    return state.lastSave;
+  }
+
   await fs.mkdir(state.options.runDir, { recursive: true });
   await fs.mkdir(path.dirname(state.options.storageStatePath), { recursive: true });
   await settlePage(page);
@@ -1775,6 +1890,48 @@ async function saveCurrentSession(state, outcomeInput = "continue") {
   });
 
   return state.lastSave;
+}
+
+async function resolveResumeActiveStatePath(explicitPath) {
+  if (explicitPath) {
+    return path.resolve(explicitPath);
+  }
+
+  const runtimeRoot = path.resolve(
+    process.env.BROWSER_HANDOFF_RUNTIME_ROOT || path.join(os.tmpdir(), "browser-handoff")
+  );
+  const entries = await fs.readdir(runtimeRoot, { withFileTypes: true }).catch((error) => {
+    if (error?.code === "ENOENT") {
+      return [];
+    }
+
+    throw error;
+  });
+  const candidates = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    const candidate = path.join(runtimeRoot, entry.name, "active.json");
+
+    if (await pathExists(candidate)) {
+      candidates.push(candidate);
+    }
+  }
+
+  if (candidates.length === 1) {
+    return candidates[0];
+  }
+
+  if (candidates.length === 0) {
+    throw new Error(`No active browser handoff found under ${runtimeRoot}.`);
+  }
+
+  throw new Error(
+    `Multiple browser handoffs are active. Pass --active-state with one of:\n${candidates.join("\n")}`
+  );
 }
 
 async function connectToActiveBrowser(activeStatePath, explicitPlaywrightRequireFrom = "") {
@@ -1825,6 +1982,7 @@ async function inspectResumedPage(page) {
 
 async function runResumeCommand(argv) {
   const options = parseResumeArgs(argv);
+  options.activeStatePath = await resolveResumeActiveStatePath(options.activeStatePath);
   const { page, record } = await connectToActiveBrowser(options.activeStatePath, options.playwrightRequireFrom);
   let result;
 
@@ -1900,8 +2058,9 @@ function touchStateActivity(state, patch = {}) {
 }
 
 function vncControlHtml(options) {
-  const vncPath = `vnc-ws?token=${encodeURIComponent(options.token)}`;
-  const iframeSrc = `/novnc/vnc.html?autoconnect=1&resize=scale&show_dot=1&path=${encodeURIComponent(vncPath)}`;
+  const publicPath = options.publicPath || "";
+  const vncPath = `${publicPath.replace(/^\//, "")}/vnc-ws?token=${encodeURIComponent(options.token)}`;
+  const iframeSrc = `${publicPath}/novnc/vnc.html?autoconnect=1&resize=scale&show_dot=1&path=${encodeURIComponent(vncPath)}`;
 
   return `<!doctype html>
 <html lang="en">
@@ -2176,7 +2335,7 @@ function vncControlHtml(options) {
     applyPageZoom(1);
 
     async function postJson(path, payload = {}) {
-      const response = await fetch(path + "?token=" + encodeURIComponent(token), {
+      const response = await fetch(${JSON.stringify(publicPath)} + path + "?token=" + encodeURIComponent(token), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload)
@@ -2581,9 +2740,26 @@ async function stopBrowserRuntime(state) {
   await clearActiveSessionIfCurrent(state.options);
 }
 
+async function cleanupEphemeralSession(options) {
+  if (!options.ephemeral) {
+    return;
+  }
+
+  await fs.rm(options.activeStatePath, { force: true });
+  if (!options.retainArtifacts) {
+    await fs.rm(options.artifactsDir, { force: true, recursive: true });
+  }
+}
+
 async function terminalizeBrowserSession(state, reason = "stopped") {
   state.terminalReason = state.terminalReason || reason;
   await stopBrowserRuntime(state);
+
+  if (state.options.ephemeral) {
+    state.server?.close();
+    await cleanupEphemeralSession(state.options);
+    setImmediate(() => process.exit(0));
+  }
 }
 
 async function closeBrowserAndServer(state) {
@@ -2594,100 +2770,7 @@ async function closeBrowserAndServer(state) {
   state.shuttingDown = true;
   state.server?.close();
   await stopBrowserRuntime(state);
-}
-
-function buildServiceCommand(options) {
-  const command = [
-    options.nodePath,
-    options.scriptPath,
-    options.targetUrl,
-    "--serve",
-    "--trust-proxy-token",
-    "--host",
-    "127.0.0.1",
-    "--token",
-    options.token,
-    "--control",
-    options.controlMode,
-    "--active-id",
-    options.activeId,
-    "--active-state",
-    options.activeStatePath,
-    "--ttl-minutes",
-    String(options.ttlMinutes),
-    "--artifacts-dir",
-    options.artifactsDir,
-    "--profile-dir",
-    options.profileDir,
-    "--storage-state",
-    options.storageStatePath,
-    "--headless",
-    options.headless ? "1" : "0",
-    "--slow-mo",
-    String(Number.isFinite(options.slowMo) ? options.slowMo : 50)
-  ];
-
-  if (options.expiresAt) {
-    command.push("--expires-at", options.expiresAt);
-  }
-
-  if (options.keepPrevious) {
-    command.push("--keep-previous");
-  }
-
-  if (options.browserPath) {
-    command.push("--browser-path", options.browserPath);
-  }
-
-  if (options.playwrightRequireFrom) {
-    command.push("--playwright-require-from", options.playwrightRequireFrom);
-  }
-
-  if (options.xvfbPath) {
-    command.push("--xvfb", options.xvfbPath);
-  }
-
-  if (options.x11vncPath) {
-    command.push("--x11vnc", options.x11vncPath);
-  }
-
-  if (options.noVncWebRoot) {
-    command.push("--novnc-web", options.noVncWebRoot);
-  }
-
-  if (options.vncDisplay) {
-    command.push("--vnc-display", options.vncDisplay);
-  }
-
-  if (options.vncPort) {
-    command.push("--vnc-port", String(options.vncPort));
-  }
-
-  if (options.deviceName) {
-    command.push("--device", options.deviceName);
-  }
-
-  if (options.userAgent) {
-    command.push("--user-agent", options.userAgent);
-  }
-
-  if (options.deviceScaleFactor !== undefined) {
-    command.push("--device-scale-factor", String(options.deviceScaleFactor));
-  }
-
-  if (options.isMobile !== undefined) {
-    command.push("--is-mobile", options.isMobile ? "1" : "0");
-  }
-
-  if (options.hasTouch !== undefined) {
-    command.push("--has-touch", options.hasTouch ? "1" : "0");
-  }
-
-  if (options.viewportWasExplicit) {
-    command.push("--viewport", `${options.viewport.width}x${options.viewport.height}`);
-  }
-
-  return command;
+  await cleanupEphemeralSession(state.options);
 }
 
 function findDeviceDescriptor(playwright, deviceName) {
@@ -2753,187 +2836,6 @@ function buildBrowserOptions(playwright, options, executablePath) {
   ];
 
   return browserOptions;
-}
-
-async function deployControlUrl(options) {
-  if (options.controlMode === "vnc") {
-    await resolveVncRuntime(options);
-  }
-
-  const deployDir = path.join(options.artifactsDir, "deploy", options.subdomain);
-  const manifestPath = path.join(deployDir, "website.json");
-  const manifest = [
-    {
-      subdomain: options.subdomain,
-      access: { mode: "token" },
-      service: {
-        command: buildServiceCommand(options),
-        workingDirectory: process.cwd()
-      }
-    }
-  ];
-
-  await fs.mkdir(deployDir, { recursive: true });
-  await fs.mkdir(options.artifactsDir, { recursive: true });
-  await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  await repairMissingRegisteredBrowserHandoffManifests(options, manifestPath);
-  await execFileAsync(options.siteManager, ["deploy", manifestPath], {
-    cwd: process.cwd(),
-    maxBuffer: 1024 * 1024
-  });
-  const { stdout } = await execFileAsync(options.siteManager, ["link", options.subdomain], {
-    cwd: process.cwd(),
-    maxBuffer: 1024 * 1024
-  });
-  const controlUrl = stdout.trim();
-  const deployment = {
-    deployedAt: new Date().toISOString(),
-    controlUrl,
-    manifestPath,
-    subdomain: options.subdomain,
-    artifactsDir: options.artifactsDir,
-    profileDir: options.profileDir,
-    storageStatePath: options.storageStatePath,
-    controlMode: options.controlMode,
-    deviceName: options.deviceName || undefined,
-    viewport: options.viewportWasExplicit ? options.viewport : undefined
-  };
-
-  await fs.writeFile(path.join(options.artifactsDir, "deployment.json"), `${JSON.stringify(deployment, null, 2)}\n`, "utf8");
-
-  console.log(`Control URL: ${controlUrl}`);
-  console.log(`Artifacts: ${options.artifactsDir}`);
-  console.log(`Profile: ${options.profileDir}`);
-  console.log(`Storage state: ${options.storageStatePath}`);
-  console.log(`Control: ${options.controlMode}`);
-  console.log(`Expires: ${options.expiresAt || "disabled"}`);
-  if (options.deviceName) {
-    console.log(`Device: ${options.deviceName}`);
-  } else if (options.viewportWasExplicit) {
-    console.log(`Viewport: ${options.viewport.width}x${options.viewport.height}`);
-  }
-  console.log("After sending the Control URL, end the agent turn. Resume only when the user messages back, then read artifacts/browser-handoff/latest.json.");
-
-  return controlUrl;
-}
-
-async function resolveExecutableFromPath(executable) {
-  if (executable.includes(path.sep)) {
-    return fs.realpath(executable).catch(() => path.resolve(executable));
-  }
-
-  try {
-    const { stdout } = await execFileAsync("which", [executable], { maxBuffer: 1024 * 64 });
-    const resolved = stdout.trim().split("\n")[0];
-
-    if (resolved) {
-      return fs.realpath(resolved).catch(() => resolved);
-    }
-  } catch {
-    // Fall through to the unresolved executable name.
-  }
-
-  return executable;
-}
-
-async function resolveSiteManagerRegistryPath(siteManager) {
-  const resolvedSiteManager = await resolveExecutableFromPath(siteManager);
-  const candidate = path.join(path.dirname(resolvedSiteManager), "caddy-sites.json");
-
-  if (await pathExists(candidate)) {
-    return candidate;
-  }
-
-  return "";
-}
-
-function inferBrowserHandoffSubdomainFromManifestPath(manifestPath) {
-  const normalized = manifestPath.split(path.sep).join("/");
-  const match = normalized.match(/\/artifacts\/browser-handoff(?:-[^/]+)?\/deploy\/([^/]+)\/website\.json$/);
-
-  if (!match) {
-    return "";
-  }
-
-  const subdomain = match[1];
-  return /^[a-z0-9-]+$/i.test(subdomain) ? subdomain : "";
-}
-
-async function createExpiredBrowserHandoffManifest(manifestPath, subdomain) {
-  const deployDir = path.dirname(manifestPath);
-  const placeholderRoot = path.join(deployDir, "placeholder");
-  const manifest = [
-    {
-      subdomain,
-      access: { mode: "token" },
-      static: { root: placeholderRoot }
-    }
-  ];
-
-  await fs.mkdir(placeholderRoot, { recursive: true });
-  await fs.writeFile(
-    path.join(placeholderRoot, "index.html"),
-    "<!doctype html>\n<meta charset=\"utf-8\">\n<title>Expired browser handoff</title>\n<p>This browser handoff session has expired.</p>\n",
-    "utf8"
-  );
-  await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-}
-
-async function repairMissingRegisteredBrowserHandoffManifests(options, currentManifestPath) {
-  const registryPath = await resolveSiteManagerRegistryPath(options.siteManager);
-
-  if (!registryPath) {
-    return;
-  }
-
-  let registry;
-
-  try {
-    registry = await readJsonFile(registryPath);
-  } catch {
-    return;
-  }
-
-  if (!Array.isArray(registry.manifests)) {
-    return;
-  }
-
-  const registryDir = path.dirname(registryPath);
-  let registryChanged = false;
-
-  for (const registeredPath of registry.manifests) {
-    if (typeof registeredPath !== "string" || !registeredPath.trim()) {
-      continue;
-    }
-
-    const manifestPath = path.resolve(registryDir, registeredPath);
-
-    if (manifestPath === currentManifestPath || await pathExists(manifestPath)) {
-      continue;
-    }
-
-    const subdomain = inferBrowserHandoffSubdomainFromManifestPath(manifestPath);
-
-    if (!subdomain) {
-      continue;
-    }
-
-    await createExpiredBrowserHandoffManifest(manifestPath, subdomain);
-    registry.expires = registry.expires && typeof registry.expires === "object" && !Array.isArray(registry.expires)
-      ? registry.expires
-      : {};
-
-    const existingExpiry = registry.expires[subdomain];
-
-    if (existingExpiry === undefined || Number.isNaN(Date.parse(existingExpiry)) || Date.parse(existingExpiry) > Date.now()) {
-      registry.expires[subdomain] = "1970-01-01T00:00:00.000Z";
-      registryChanged = true;
-    }
-  }
-
-  if (registryChanged) {
-    await fs.writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`, "utf8");
-  }
 }
 
 function terminalHandoffPayload(options, reason) {
@@ -3029,7 +2931,8 @@ async function runVncBrowserServer(options) {
         "-nolisten",
         "tcp"
       ],
-      options.runDir
+      options.runDir,
+      { ephemeral: options.ephemeral && !options.retainArtifacts }
     );
     childProcesses.push(xvfb);
     await waitForDisplay(options.vncDisplay);
@@ -3049,7 +2952,10 @@ async function runVncBrowserServer(options) {
         "-quiet"
       ],
       options.runDir,
-      { env: { ...process.env, DISPLAY: options.vncDisplay } }
+      {
+        env: { ...process.env, DISPLAY: options.vncDisplay },
+        ephemeral: options.ephemeral && !options.retainArtifacts
+      }
     );
     childProcesses.push(x11vnc);
     await waitForTcpPort(options.vncPort);
@@ -3077,33 +2983,37 @@ async function runVncBrowserServer(options) {
       childProcesses
     };
 
-    context.on("response", async (browserResponse) => {
-      const line = `${browserResponse.status()} ${browserResponse.url()}\n`;
-      await fs.appendFile(path.join(options.runDir, "network.log"), line).catch(() => {});
-    });
+    if (!options.ephemeral || options.retainArtifacts) {
+      context.on("response", async (browserResponse) => {
+        const line = `${browserResponse.status()} ${browserResponse.url()}\n`;
+        await fs.appendFile(path.join(options.runDir, "network.log"), line).catch(() => {});
+      });
 
-    context.on("page", (page) => {
-      page.on("console", async (message) => {
+      context.on("page", (page) => {
+        page.on("console", async (message) => {
+          const line = `[browser:${message.type()}] ${message.text()}\n`;
+          await fs.appendFile(path.join(options.runDir, "browser-console.log"), line).catch(() => {});
+        });
+      });
+
+      initialPage.on("console", async (message) => {
         const line = `[browser:${message.type()}] ${message.text()}\n`;
         await fs.appendFile(path.join(options.runDir, "browser-console.log"), line).catch(() => {});
       });
-    });
-
-    initialPage.on("console", async (message) => {
-      const line = `[browser:${message.type()}] ${message.text()}\n`;
-      await fs.appendFile(path.join(options.runDir, "browser-console.log"), line).catch(() => {});
-    });
+    }
 
     await initialPage.goto(options.targetUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
     await settlePage(initialPage);
-    await fs.writeFile(path.join(options.runDir, "initial.html"), await initialPage.content(), "utf8");
-    await fs.writeFile(path.join(options.runDir, "initial-url.txt"), `${initialPage.url()}\n`, "utf8");
-    await initialPage.screenshot({
-      path: path.join(options.runDir, "initial.png"),
-      fullPage: true,
-      animations: "disabled",
-      timeout: 30_000
-    }).catch(() => {});
+    if (!options.ephemeral || options.retainArtifacts) {
+      await fs.writeFile(path.join(options.runDir, "initial.html"), await initialPage.content(), "utf8");
+      await fs.writeFile(path.join(options.runDir, "initial-url.txt"), `${initialPage.url()}\n`, "utf8");
+      await initialPage.screenshot({
+        path: path.join(options.runDir, "initial.png"),
+        fullPage: true,
+        animations: "disabled",
+        timeout: 30_000
+      }).catch(() => {});
+    }
 
     const server = createServer(state);
     state.server = server;
@@ -3157,6 +3067,7 @@ async function runVncBrowserServer(options) {
     }
 
     await clearActiveSessionIfCurrent(options).catch(() => {});
+    await cleanupEphemeralSession(options).catch(() => {});
     throw error;
   }
 }
@@ -3165,7 +3076,786 @@ async function runBrowserServer(options) {
   await runVncBrowserServer(options);
 }
 
+function gatewayAuthorized(request, secret) {
+  if (!secret) {
+    return false;
+  }
+
+  const authorization = request.headers.authorization || "";
+  const supplied = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+  const expectedBuffer = Buffer.from(secret);
+  const suppliedBuffer = Buffer.from(supplied);
+
+  return expectedBuffer.length === suppliedBuffer.length
+    && crypto.timingSafeEqual(expectedBuffer, suppliedBuffer);
+}
+
+async function validateGatewaySessionRequest(payload) {
+  if (payload.protocolVersion !== GATEWAY_PROTOCOL_VERSION) {
+    throw new Error(`Unsupported gateway protocol version: ${payload.protocolVersion ?? "missing"}.`);
+  }
+
+  let targetUrl;
+
+  try {
+    targetUrl = new URL(String(payload.targetUrl || ""));
+  } catch {
+    throw new Error("Gateway session requires a valid targetUrl.");
+  }
+
+  if (!["http:", "https:"].includes(targetUrl.protocol)) {
+    throw new Error(`Unsupported URL protocol: ${targetUrl.protocol}`);
+  }
+
+  const ttlMinutes = Number(payload.ttlMinutes ?? DEFAULT_TTL_MINUTES);
+
+  if (!Number.isFinite(ttlMinutes) || ttlMinutes <= 0 || ttlMinutes > 60) {
+    throw new Error("Gateway browser sessions require a TTL greater than 0 and no more than 60 minutes.");
+  }
+
+  const noVncWebRoot = path.resolve(String(payload.noVncWebRoot || ""));
+
+  if (!payload.xvfbPath || !payload.x11vncPath || !noVncWebRoot
+    || !(await pathExists(path.join(noVncWebRoot, "vnc.html")))) {
+    throw new Error("Gateway session requires valid Xvfb, x11vnc, and noVNC runtime paths.");
+  }
+}
+
+async function getFreeLoopbackPort() {
+  const server = net.createServer();
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  await new Promise((resolve) => server.close(resolve));
+
+  if (!port) {
+    throw new Error("Could not allocate a browser worker port.");
+  }
+
+  return port;
+}
+
+async function reserveLoopbackPort(reservedPorts) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const port = await getFreeLoopbackPort();
+
+    if (!reservedPorts.has(port)) {
+      reservedPorts.add(port);
+      return port;
+    }
+  }
+
+  throw new Error("Could not reserve a unique browser handoff port.");
+}
+
+async function reserveVncDisplay(reservedDisplays) {
+  for (let displayNumber = 90; displayNumber < 190; displayNumber += 1) {
+    const display = `:${displayNumber}`;
+
+    if (!reservedDisplays.has(display)
+      && !await pathExists(path.join(os.tmpdir(), ".X11-unix", `X${displayNumber}`))) {
+      reservedDisplays.add(display);
+      return display;
+    }
+  }
+
+  throw new Error("No VNC display is available for a browser handoff.");
+}
+
+function validateGatewayRuntimeRoot(runtimeRoot) {
+  const temporaryRoot = path.resolve(os.tmpdir());
+  const resolved = path.resolve(runtimeRoot);
+
+  if (resolved === temporaryRoot
+    || !pathContains(temporaryRoot, resolved)
+    || !path.basename(resolved).startsWith("browser-handoff")) {
+    throw new Error(`Refusing unsafe browser handoff runtime root: ${resolved}`);
+  }
+}
+
+async function directorySize(root) {
+  let total = 0;
+
+  for (const entry of await fs.readdir(root, { withFileTypes: true }).catch(() => [])) {
+    const entryPath = path.join(root, entry.name);
+
+    if (entry.isDirectory()) {
+      total += await directorySize(entryPath);
+    } else if (entry.isFile()) {
+      total += await fs.stat(entryPath).then((stat) => stat.size).catch(() => 0);
+    }
+  }
+
+  return total;
+}
+
+async function pruneRetainedArtifacts(root, maximumDirectories = 3, maximumBytes = 50 * 1024 * 1024) {
+  const entries = (await fs.readdir(root, { withFileTypes: true }).catch(() => []))
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+
+  while (entries.length > maximumDirectories) {
+    await fs.rm(path.join(root, entries.shift()), { force: true, recursive: true });
+  }
+
+  while (entries.length > 0 && await directorySize(root) > maximumBytes) {
+    await fs.rm(path.join(root, entries.shift()), { force: true, recursive: true });
+  }
+}
+
+async function prunePersistentProfile(profileDirectory) {
+  const cachePaths = [
+    "BrowserMetrics",
+    "component_crx_cache",
+    "extensions_crx_cache",
+    "GraphiteDawnCache",
+    "GrShaderCache",
+    "ShaderCache",
+    path.join("Default", "Cache"),
+    path.join("Default", "Code Cache"),
+    path.join("Default", "GPUCache"),
+    path.join("Default", "Service Worker", "CacheStorage")
+  ];
+
+  for (const relativePath of cachePaths) {
+    await fs.rm(path.join(profileDirectory, relativePath), { force: true, recursive: true });
+  }
+
+  for (const entry of await fs.readdir(profileDirectory, { withFileTypes: true }).catch(() => [])) {
+    if (entry.name.startsWith("BrowserMetrics-")) {
+      await fs.rm(path.join(profileDirectory, entry.name), { force: true, recursive: true });
+    }
+  }
+
+  if (await directorySize(profileDirectory) > DEFAULT_MAX_SESSION_BYTES) {
+    await fs.rm(profileDirectory, { force: true, recursive: true });
+  }
+}
+
+async function prunePersistentProfiles(root, activeProfiles, maximumProfiles = 3) {
+  const profiles = [];
+
+  for (const entry of await fs.readdir(root, { withFileTypes: true }).catch(() => [])) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    const profileDirectory = path.join(root, entry.name);
+    const marker = await fs.stat(profileMarkerPath(profileDirectory)).catch(() => undefined);
+    const directory = await fs.stat(profileDirectory).catch(() => undefined);
+    profiles.push({
+      path: profileDirectory,
+      key: normalizeProfileDir(profileDirectory),
+      updatedAt: marker?.mtimeMs || directory?.mtimeMs || 0
+    });
+  }
+
+  profiles.sort((left, right) => left.updatedAt - right.updatedAt);
+  const removable = () => profiles.findIndex((profile) => !activeProfiles.has(profile.key));
+
+  while (profiles.length > maximumProfiles || await directorySize(root) > DEFAULT_MAX_SESSION_BYTES) {
+    const index = removable();
+
+    if (index < 0) {
+      break;
+    }
+
+    const [profile] = profiles.splice(index, 1);
+    await fs.rm(profile.path, { force: true, recursive: true });
+  }
+}
+
+async function waitForGatewayWorker(session, timeoutMs = 90_000) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (session.child.exitCode !== null || session.child.signalCode !== null) {
+      throw new Error(session.stderr.trim() || "Browser worker exited before becoming ready.");
+    }
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${session.port}/status`);
+
+      if (response.ok) {
+        return;
+      }
+    } catch {
+      // The worker is still starting.
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error("Browser worker did not become ready before the startup timeout.");
+}
+
+function proxyGatewayRequest(request, response, session) {
+  const upstream = http.request({
+    host: "127.0.0.1",
+    port: session.port,
+    method: request.method,
+    path: request.url,
+    headers: { ...request.headers, host: `127.0.0.1:${session.port}` }
+  }, (upstreamResponse) => {
+    response.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.headers);
+    upstreamResponse.pipe(response);
+  });
+
+  upstream.on("error", (error) => {
+    if (!response.headersSent) {
+      sendJson(response, 502, { error: error.message });
+    } else {
+      response.destroy(error);
+    }
+  });
+  request.pipe(upstream);
+}
+
+function proxyGatewayUpgrade(request, socket, head, session) {
+  const upstream = net.connect({ host: "127.0.0.1", port: session.port }, () => {
+    const headers = [];
+
+    for (let index = 0; index < request.rawHeaders.length; index += 2) {
+      const name = request.rawHeaders[index];
+      const value = name.toLowerCase() === "host" ? `127.0.0.1:${session.port}` : request.rawHeaders[index + 1];
+      headers.push(`${name}: ${value}`);
+    }
+
+    upstream.write(`${request.method} ${request.url} HTTP/${request.httpVersion}\r\n${headers.join("\r\n")}\r\n\r\n`);
+    upstream.write(head);
+    socket.pipe(upstream).pipe(socket);
+  });
+
+  upstream.on("error", () => socket.destroy());
+  socket.on("error", () => upstream.destroy());
+}
+
+function gatewaySessionRoute(pathname, sessions) {
+  const match = pathname.match(/^\/sessions\/([a-f0-9]{24})(\/.*)?$/);
+
+  if (!match) {
+    return undefined;
+  }
+
+  const session = sessions.get(match[1]);
+
+  return session
+    ? { session, basePath: `/sessions/${match[1]}`, upstreamPath: match[2] || "/" }
+    : undefined;
+}
+
+function requestCookie(request, name) {
+  const encoded = (request.headers.cookie || "").split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${name}=`))
+    ?.slice(name.length + 1);
+
+  if (!encoded) {
+    return "";
+  }
+
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return "";
+  }
+}
+
+function gatewaySessionCookie(route, handle) {
+  return `browser_handoff_session=${encodeURIComponent(handle)}; Path=${route.basePath}/; HttpOnly; Secure; SameSite=Lax`;
+}
+
+async function runGateway(argv) {
+  const options = parseGatewayArgs(argv);
+  const sessions = new Map();
+  const recentFailures = [];
+  const reservedDisplays = new Set();
+  const reservedPorts = new Set();
+  const reservedProfiles = new Set();
+  const buildId = await currentImplementationBuildId();
+
+  if (options.buildId && options.buildId !== buildId) {
+    throw new Error("Browser handoff gateway build identity does not match its script.");
+  }
+
+  if (!options.secret) {
+    const state = await readJsonFile(path.join(options.stateDirectory, "gateway.json")).catch(() => ({}));
+    options.secret = defaultString(state.secret);
+  }
+
+  if (!options.secret) {
+    throw new Error("Browser handoff gateway has no session-creation secret.");
+  }
+
+  validateGatewayRuntimeRoot(options.runtimeRoot);
+  await fs.rm(options.runtimeRoot, { force: true, recursive: true });
+
+  const cleanupSession = async (session, terminate = true) => {
+    if (!session) {
+      return;
+    }
+
+    if (session.cleanupPromise) {
+      return await session.cleanupPromise;
+    }
+
+    session.cleanupPromise = (async () => {
+      sessions.delete(session.id);
+
+      if (terminate && session.child && session.child.exitCode === null && session.child.signalCode === null) {
+        try {
+          process.kill(-session.child.pid, "SIGTERM");
+        } catch {
+          // The worker already exited.
+        }
+
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, 5_000);
+          session.child.once("exit", () => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+      }
+
+      if (session.child?.pid) {
+        try {
+          process.kill(-session.child.pid, "SIGKILL");
+        } catch {
+          // The process group is already gone.
+        }
+      }
+
+      if (session.profileDirectory && !pathContains(session.directory, session.profileDirectory)) {
+        await prunePersistentProfile(session.profileDirectory);
+        const protectedProfiles = new Set(reservedProfiles);
+        protectedProfiles.delete(session.profileKey);
+        await prunePersistentProfiles(path.join(options.stateDirectory, "profiles"), protectedProfiles);
+      }
+
+      if (session.retainArtifacts) {
+        await fs.rm(path.join(session.directory, "profile"), { force: true, recursive: true });
+        await fs.rm(path.join(session.directory, "sessions"), { force: true, recursive: true });
+        await fs.rm(path.join(session.directory, "storage-state.json"), { force: true });
+        await fs.rm(path.join(session.directory, "active.json"), { force: true });
+        await fs.rm(path.join(session.directory, "active.json.lock"), { force: true });
+        await pruneRetainedArtifacts(path.dirname(session.directory));
+      } else {
+        await fs.rm(session.directory, { force: true, recursive: true });
+      }
+    })().finally(() => {
+      reservedDisplays.delete(session.vncDisplay);
+      reservedPorts.delete(session.port);
+      reservedPorts.delete(session.vncPort);
+      reservedProfiles.delete(session.profileKey);
+    });
+
+    return await session.cleanupPromise;
+  };
+
+  const server = http.createServer(async (request, response) => {
+    const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+
+    if (request.method === "GET" && url.pathname === "/gateway/health") {
+      sendJson(response, 200, {
+        ok: true,
+        protocolVersion: GATEWAY_PROTOCOL_VERSION,
+        buildId,
+        activeSessions: sessions.size
+      });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/gateway/sessions") {
+      if (!gatewayAuthorized(request, options.secret)) {
+        sendText(response, 401, "Unauthorized\n");
+        return;
+      }
+
+      const cutoff = Date.now() - 60_000;
+
+      while (recentFailures.length > 0 && recentFailures[0] < cutoff) {
+        recentFailures.shift();
+      }
+
+      if (recentFailures.length >= 3) {
+        sendJson(response, 503, { error: "Browser session startup circuit breaker is open; retry in one minute." });
+        return;
+      }
+
+      if (sessions.size >= 4) {
+        sendJson(response, 429, { error: "Browser handoff gateway is at its four-session limit." });
+        return;
+      }
+
+      let startingSession;
+      let reservedDisplay = "";
+      let reservedProfileKey = "";
+      let workerPort = 0;
+      let workerVncPort = 0;
+
+      try {
+        const payload = await readJsonBody(request);
+        await validateGatewaySessionRequest(payload);
+        const persistentProfile = String(payload.persistProfile || "");
+
+        if (persistentProfile && !/^[A-Za-z0-9_-]{1,64}$/.test(persistentProfile)) {
+          throw new Error("Persistent profile names may contain only letters, numbers, dashes, and underscores.");
+        }
+
+        const sessionId = defaultActiveId();
+        const sessionHandle = `${sessionId}.${crypto.randomBytes(24).toString("hex")}`;
+        const retainArtifacts = payload.retainArtifacts === true;
+        const directory = retainArtifacts
+          ? path.join(options.stateDirectory, "artifacts", sessionId)
+          : path.join(options.runtimeRoot, sessionId);
+        const profileDirectory = persistentProfile
+          ? path.join(options.stateDirectory, "profiles", persistentProfile)
+          : path.join(directory, "profile");
+        const profileKey = persistentProfile ? normalizeProfileDir(profileDirectory) : "";
+
+        if (profileKey && reservedProfiles.has(profileKey)) {
+          throw new Error(`Persistent browser profile is already in use: ${persistentProfile}`);
+        }
+
+        if (profileKey) {
+          reservedProfiles.add(profileKey);
+          reservedProfileKey = profileKey;
+        }
+
+        workerPort = await reserveLoopbackPort(reservedPorts);
+        workerVncPort = await reserveLoopbackPort(reservedPorts);
+        reservedDisplay = await reserveVncDisplay(reservedDisplays);
+        const workerToken = crypto.randomBytes(18).toString("hex");
+        const command = [
+          fileURLToPath(import.meta.url),
+          payload.targetUrl,
+          "--local",
+          "--ephemeral",
+          "--trust-proxy-token",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(workerPort),
+          "--token",
+          workerToken,
+          "--public-path",
+          `/sessions/${sessionId}`,
+          "--active-id",
+          sessionId,
+          "--active-state",
+          path.join(directory, "active.json"),
+          "--artifacts-dir",
+          directory,
+          "--profile-dir",
+          profileDirectory,
+          "--storage-state",
+          path.join(directory, "storage-state.json"),
+          "--ttl-minutes",
+          String(payload.ttlMinutes ?? DEFAULT_TTL_MINUTES),
+          "--xvfb",
+          payload.xvfbPath,
+          "--x11vnc",
+          payload.x11vncPath,
+          "--novnc-web",
+          payload.noVncWebRoot,
+          "--vnc-display",
+          reservedDisplay,
+          "--vnc-port",
+          String(workerVncPort)
+        ];
+
+        if (retainArtifacts) {
+          command.push("--retain-artifacts");
+        }
+        const optionalArguments = [
+          ["--browser-path", payload.browserPath],
+          ["--playwright-require-from", payload.playwrightRequireFrom],
+          ["--device", payload.deviceName],
+          ["--user-agent", payload.userAgent],
+          ["--viewport", payload.viewport],
+          ["--device-scale-factor", payload.deviceScaleFactor],
+          ["--is-mobile", payload.isMobile],
+          ["--has-touch", payload.hasTouch]
+        ];
+
+        for (const [name, value] of optionalArguments) {
+          if (value !== undefined && value !== "") {
+            command.push(name, String(value));
+          }
+        }
+
+        await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+        const child = spawn(process.execPath, command, {
+          detached: true,
+          env: { ...process.env, BROWSER_HANDOFF_ACTIVE_STATE: "" },
+          stdio: ["ignore", "ignore", "pipe"]
+        });
+        const session = {
+          id: sessionId,
+          handle: sessionHandle,
+          directory,
+          profileDirectory,
+          retainArtifacts,
+          port: workerPort,
+          vncPort: workerVncPort,
+          vncDisplay: reservedDisplay,
+          profileKey,
+          child,
+          stderr: ""
+        };
+        startingSession = session;
+        sessions.set(sessionId, session);
+        child.stderr.setEncoding("utf8");
+        child.stderr.on("data", (chunk) => {
+          session.stderr = `${session.stderr}${chunk}`.slice(-64 * 1024);
+        });
+        child.once("exit", () => void cleanupSession(session, false));
+        await waitForGatewayWorker(session);
+        sendJson(response, 201, {
+          ok: true,
+          activeId: sessionId,
+          sessionHandle,
+          activeStatePath: path.join(directory, "active.json")
+        });
+      } catch (error) {
+        if (startingSession) {
+          recentFailures.push(Date.now());
+        } else {
+          reservedDisplays.delete(reservedDisplay);
+          reservedPorts.delete(workerPort);
+          reservedPorts.delete(workerVncPort);
+          reservedProfiles.delete(reservedProfileKey);
+        }
+        await cleanupSession(startingSession);
+        sendJson(response, 500, { error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+
+    const route = gatewaySessionRoute(url.pathname, sessions);
+
+    if (!route) {
+      sendJson(response, 410, { error: "No active browser handoff." });
+      return;
+    }
+
+    const requestedHandle = url.searchParams.get("handoff") || "";
+
+    if (requestedHandle && request.method === "GET" && route.upstreamPath === "/") {
+      if (route.session.handle !== requestedHandle) {
+        sendJson(response, 410, { error: "Browser handoff session is unavailable." });
+        return;
+      }
+
+      response.writeHead(302, {
+        location: `${route.basePath}/`,
+        "set-cookie": gatewaySessionCookie(route, requestedHandle),
+        "cache-control": "no-store"
+      });
+      response.end();
+      return;
+    }
+
+    const sessionHandle = requestCookie(request, "browser_handoff_session");
+
+    if (route.session.handle !== sessionHandle) {
+      sendJson(response, 410, { error: "No active browser handoff." });
+      return;
+    }
+
+    request.url = `${route.upstreamPath}${url.search}`;
+    proxyGatewayRequest(request, response, route.session);
+  });
+  server.on("upgrade", (request, socket, head) => {
+    const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+    const route = gatewaySessionRoute(url.pathname, sessions);
+    const sessionHandle = requestCookie(request, "browser_handoff_session");
+
+    if (!route || route.session.handle !== sessionHandle) {
+      rejectUpgrade(socket, 410, "Gone");
+      return;
+    }
+
+    request.url = `${route.upstreamPath}${url.search}`;
+    proxyGatewayUpgrade(request, socket, head, route.session);
+  });
+
+  const close = async () => {
+    server.close();
+    await Promise.all([...sessions.values()].map((session) => cleanupSession(session)));
+  };
+
+  process.once("SIGINT", () => void close().finally(() => process.exit(0)));
+  process.once("SIGTERM", () => void close().finally(() => process.exit(0)));
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(options.port, options.host, resolve);
+  });
+}
+
+function gatewayStateDirectory() {
+  return path.join(os.homedir(), ".local", "state", "browser-handoff");
+}
+
+async function currentImplementationBuildId() {
+  const source = await fs.readFile(fileURLToPath(import.meta.url));
+  return crypto.createHash("sha256").update(source).digest("hex").slice(0, 16);
+}
+
+async function gatewayHealth(controlUrl) {
+  try {
+    const url = new URL(controlUrl);
+    url.pathname = "/gateway/health";
+    const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+    const result = await response.json();
+    return response.ok
+      && result.protocolVersion === GATEWAY_PROTOCOL_VERSION
+      && result.buildId === await currentImplementationBuildId();
+  } catch {
+    return false;
+  }
+}
+
+async function waitForGatewayHealth(controlUrl, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (await gatewayHealth(controlUrl)) {
+      return true;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  return false;
+}
+
+async function ensureGatewayDeployment(options) {
+  const stateDirectory = gatewayStateDirectory();
+  const statePath = path.join(stateDirectory, "gateway.json");
+  const manifestPath = path.join(stateDirectory, "website.json");
+  const existing = await readJsonFile(statePath).catch(() => ({}));
+  const buildId = await currentImplementationBuildId();
+  const state = {
+    subdomain: defaultString(existing.subdomain) || "browser-handoff",
+    secret: defaultString(existing.secret) || crypto.randomBytes(32).toString("hex")
+  };
+  let controlUrl = "";
+
+  try {
+    const linked = await execFileAsync(options.siteManager, ["link", state.subdomain], {
+      cwd: process.cwd(),
+      maxBuffer: 1024 * 1024
+    });
+    controlUrl = linked.stdout.trim();
+  } catch {
+    // The gateway has not been registered yet.
+  }
+
+  if (controlUrl && await gatewayHealth(controlUrl)) {
+    return { ...state, controlUrl };
+  }
+
+  const manifest = [{
+    subdomain: state.subdomain,
+    access: { mode: "token" },
+    service: {
+      command: [
+        options.nodePath,
+        options.scriptPath,
+        "gateway",
+        "--build-id",
+        buildId,
+        "--host",
+        "127.0.0.1",
+        "--runtime-root",
+        path.join(os.tmpdir(), "browser-handoff"),
+        "--state-dir",
+        stateDirectory
+      ],
+      workingDirectory: process.cwd()
+    }
+  }];
+
+  await fs.mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+  await writePrivateRecord(statePath, state);
+  await writePrivateRecord(manifestPath, manifest);
+  await execFileAsync(options.siteManager, ["deploy", manifestPath], {
+    cwd: process.cwd(),
+    maxBuffer: 1024 * 1024
+  });
+  const linked = await execFileAsync(options.siteManager, ["link", state.subdomain], {
+    cwd: process.cwd(),
+    maxBuffer: 1024 * 1024
+  });
+  controlUrl = linked.stdout.trim();
+
+  if (!await waitForGatewayHealth(controlUrl)) {
+    throw new Error("Browser handoff gateway did not become healthy after deployment.");
+  }
+
+  return { ...state, controlUrl };
+}
+
+async function openGatewaySession(options) {
+  const gateway = await ensureGatewayDeployment(options);
+  const sessionUrl = new URL(gateway.controlUrl);
+  sessionUrl.pathname = "/gateway/sessions";
+  const response = await fetch(sessionUrl, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${gateway.secret}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      protocolVersion: GATEWAY_PROTOCOL_VERSION,
+      targetUrl: options.targetUrl,
+      ttlMinutes: options.ttlMinutes,
+      browserPath: options.browserPath,
+      playwrightRequireFrom: options.playwrightRequireFrom,
+      xvfbPath: options.xvfbPath,
+      x11vncPath: options.x11vncPath,
+      noVncWebRoot: options.noVncWebRoot,
+      deviceName: options.deviceName || undefined,
+      userAgent: options.userAgent || undefined,
+      viewport: options.viewportWasExplicit ? `${options.viewport.width}x${options.viewport.height}` : undefined,
+      deviceScaleFactor: options.deviceScaleFactor,
+      isMobile: options.isMobile,
+      hasTouch: options.hasTouch,
+      retainArtifacts: options.retainArtifacts,
+      persistProfile: options.persistProfile || undefined
+    }),
+    signal: AbortSignal.timeout(120_000)
+  });
+  const result = await response.json();
+
+  if (!response.ok) {
+    throw new Error(result.error || `Browser gateway returned ${response.status}.`);
+  }
+
+  const controlUrl = new URL(gateway.controlUrl);
+  controlUrl.pathname = `/sessions/${result.activeId}/`;
+  controlUrl.searchParams.set("handoff", result.sessionHandle);
+  console.log(`Control URL: ${controlUrl}`);
+  console.log(`Active ID: ${result.activeId}`);
+  console.log(`Active state: ${result.activeStatePath}`);
+  console.log(`Expires: ${options.expiresAt || `${options.ttlMinutes} minutes after start`}`);
+  console.log("After sending the Control URL, end the agent turn. Resume only when the user messages back.");
+}
+
 async function main() {
+  if (process.argv[2] === "gateway") {
+    await runGateway(process.argv.slice(3));
+    return;
+  }
+
   if (process.argv[2] === "resume") {
     await runResumeCommand(process.argv.slice(3));
     return;
@@ -3173,23 +3863,14 @@ async function main() {
 
   const options = parseArgs(process.argv.slice(2));
   prepareLifecycleOptions(options);
-  options.playwrightRequireFrom = await resolvePlaywrightRequireFrom(options.playwrightRequireFrom, options.artifactsDir);
+  options.playwrightRequireFrom = await resolvePlaywrightRequireFrom(
+    options.playwrightRequireFrom,
+    options.mode === "deploy" ? "" : options.artifactsDir
+  );
 
   if (options.mode === "deploy") {
     await preflightBrowserRuntime(options);
-    await stopPreviousActiveSession(options);
-    await cleanupStaleChromiumForProfile(options);
-    await writeActiveSessionRecord(options, "", "starting");
-
-    try {
-      const controlUrl = await deployControlUrl(options);
-      await writeActiveSessionRecord(options, controlUrl, "running");
-      await writeWorkspaceDefaults(options);
-    } catch (error) {
-      await clearActiveSessionIfCurrent(options);
-      throw error;
-    }
-
+    await openGatewaySession(options);
     return;
   }
 
@@ -3203,7 +3884,11 @@ async function main() {
   await runBrowserServer(options);
 }
 
-await main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+if (path.resolve(process.argv[1] || "") === fileURLToPath(import.meta.url)) {
+  await main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}
+
+export { gatewaySessionCookie, gatewaySessionRoute, requestCookie };
