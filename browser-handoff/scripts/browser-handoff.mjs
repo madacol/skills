@@ -1519,17 +1519,33 @@ async function patchActiveSessionRecord(options, patch) {
 
 async function clearActiveSessionIfCurrent(options) {
   const markStopped = async (recordPath) => {
+    if (!await pathExists(recordPath)) {
+      return;
+    }
+
     await withRecordLock(recordPath, async () => {
       const record = await readActiveSessionRecord(recordPath).catch(() => undefined);
 
       if (record?.activeId === options.activeId) {
-        const stoppedAt = new Date().toISOString();
+        const alreadyStoppedAndSanitized = record.status === "stopped"
+          && !record.controlUrl
+          && !record.stopUrl
+          && !record.cdpEndpoint;
+
+        if (alreadyStoppedAndSanitized) {
+          return;
+        }
+
+        const wasAlreadyStopped = record.status === "stopped";
+        const stoppedAt = wasAlreadyStopped
+          ? record.stoppedAt || record.updatedAt || new Date().toISOString()
+          : new Date().toISOString();
 
         await writePrivateRecord(recordPath, {
           ...record,
           status: "stopped",
           stoppedAt,
-          updatedAt: stoppedAt,
+          updatedAt: wasAlreadyStopped ? record.updatedAt || stoppedAt : stoppedAt,
           controlUrl: "",
           stopUrl: "",
           cdpEndpoint: ""
@@ -1579,38 +1595,48 @@ function expirationReason(options) {
   return Date.now() >= Date.parse(options.expiresAt) ? "expired" : "";
 }
 
-async function inactiveSessionReason(state) {
-  const expired = expirationReason(state.options);
+async function inactiveOptionsReason(options) {
+  const expired = expirationReason(options);
 
   if (expired) {
     return expired;
   }
 
-  if (state.options.keepPrevious) {
+  if (options.keepPrevious) {
     return "";
   }
 
-  const record = await readActiveSessionRecord(state.options.activeStatePath).catch(() => undefined);
+  const record = await readActiveSessionRecord(options.activeStatePath).catch(() => undefined);
 
-  if (record?.activeId && record.activeId !== state.options.activeId) {
+  if (record?.activeId === options.activeId && record.status === "stopped") {
+    return "stopped";
+  }
+
+  if (record?.activeId && record.activeId !== options.activeId) {
     return "replaced";
   }
 
   return "";
 }
 
+async function inactiveSessionReason(state) {
+  return await inactiveOptionsReason(state.options);
+}
+
 function scheduleLifecycle(state) {
   if (state.options.expiresAt) {
     const delay = Math.max(0, Date.parse(state.options.expiresAt) - Date.now());
     state.expirationTimer = setTimeout(() => {
-      void closeBrowserAndServer(state);
+      void terminalizeBrowserSession(state, "expired");
     }, delay);
     state.expirationTimer.unref?.();
   }
 
   state.activeCheckTimer = setInterval(async () => {
-    if (await inactiveSessionReason(state)) {
-      await closeBrowserAndServer(state);
+    const inactiveReason = await inactiveSessionReason(state);
+
+    if (inactiveReason) {
+      await terminalizeBrowserSession(state, inactiveReason);
     }
   }, 5_000);
   state.activeCheckTimer.unref?.();
@@ -2264,13 +2290,28 @@ function createServer(state) {
     }
 
     try {
+      if (state.terminalReason) {
+        if (request.method === "POST" && url.pathname === "/stop") {
+          sendJson(response, 200, {
+            ok: true,
+            activeId: state.options.activeId,
+            status: "stopped",
+            reason: state.terminalReason
+          });
+          return;
+        }
+
+        sendJson(response, 410, terminalHandoffPayload(state.options, state.terminalReason));
+        return;
+      }
+
       if (!(request.method === "POST" && url.pathname === "/stop")) {
         const inactiveReason = await inactiveSessionReason(state);
 
         if (inactiveReason) {
-          sendJson(response, 410, { error: `Browser handoff ${inactiveReason}.` });
+          sendJson(response, 410, terminalHandoffPayload(state.options, inactiveReason));
           setTimeout(() => {
-            void closeBrowserAndServer(state);
+            void terminalizeBrowserSession(state, inactiveReason);
           }, 50);
           return;
         }
@@ -2329,7 +2370,7 @@ function createServer(state) {
       if (request.method === "POST" && url.pathname === "/stop") {
         sendJson(response, 200, { ok: true });
         setTimeout(() => {
-          void closeBrowserAndServer(state);
+          void terminalizeBrowserSession(state, "stopped");
         }, 50);
         return;
       }
@@ -2443,6 +2484,11 @@ function attachVncWebSocketProxy(server, state) {
       return;
     }
 
+    if (state.terminalReason) {
+      rejectUpgrade(socket, 410, "Gone");
+      return;
+    }
+
     const key = request.headers["sec-websocket-key"];
 
     if (typeof key !== "string") {
@@ -2513,15 +2559,14 @@ function attachVncWebSocketProxy(server, state) {
   });
 }
 
-async function closeBrowserAndServer(state) {
-  if (state.shuttingDown) {
+async function stopBrowserRuntime(state) {
+  if (state.runtimeStopped) {
     return;
   }
 
-  state.shuttingDown = true;
+  state.runtimeStopped = true;
   clearTimeout(state.expirationTimer);
   clearInterval(state.activeCheckTimer);
-  state.server?.close();
   await state.context?.close().catch(() => {});
 
   for (const child of [...(state.childProcesses ?? [])].reverse()) {
@@ -2534,6 +2579,21 @@ async function closeBrowserAndServer(state) {
     cdpEndpoint: ""
   }).catch(() => {});
   await clearActiveSessionIfCurrent(state.options);
+}
+
+async function terminalizeBrowserSession(state, reason = "stopped") {
+  state.terminalReason = state.terminalReason || reason;
+  await stopBrowserRuntime(state);
+}
+
+async function closeBrowserAndServer(state) {
+  if (state.shuttingDown) {
+    return;
+  }
+
+  state.shuttingDown = true;
+  state.server?.close();
+  await stopBrowserRuntime(state);
 }
 
 function buildServiceCommand(options) {
@@ -2876,7 +2936,72 @@ async function repairMissingRegisteredBrowserHandoffManifests(options, currentMa
   }
 }
 
+function terminalHandoffPayload(options, reason) {
+  return {
+    error: `Browser handoff ${reason}.`,
+    activeId: options.activeId,
+    status: "stopped",
+    reason,
+    expiresAt: options.expiresAt || undefined
+  };
+}
+
+async function runTerminalControlServer(options, reason) {
+  await clearActiveSessionIfCurrent(options).catch(() => {});
+
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+
+    if (!isAuthorized(url, options)) {
+      sendText(response, 401, "Unauthorized\n");
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/stop") {
+      sendJson(response, 200, {
+        ok: true,
+        activeId: options.activeId,
+        status: "stopped",
+        reason
+      });
+      return;
+    }
+
+    sendJson(response, 410, terminalHandoffPayload(options, reason));
+  });
+
+  server.listen(options.port, options.host, () => {
+    const displayHost = options.host === "0.0.0.0" ? "127.0.0.1" : options.host;
+    const controlUrl = `http://${displayHost}:${options.port}/?token=${encodeURIComponent(options.token)}`;
+
+    console.log(`Browser handoff ${reason}; no browser runtime started.`);
+    console.log(`Control URL: ${controlUrl}`);
+    console.log(`Active ID: ${options.activeId}`);
+    console.log(`Expires: ${options.expiresAt || "disabled"}`);
+  });
+
+  process.on("SIGINT", () => {
+    server.close();
+    process.exit(0);
+  });
+
+  process.on("SIGTERM", () => {
+    server.close();
+    process.exit(0);
+  });
+}
+
 async function runVncBrowserServer(options) {
+  if (options.mode === "serve") {
+    const startupInactiveReason = await inactiveOptionsReason(options);
+
+    if (startupInactiveReason) {
+      await cleanupStaleChromiumForProfile(options);
+      await runTerminalControlServer(options, startupInactiveReason);
+      return;
+    }
+  }
+
   await cleanupStaleChromiumForProfile(options);
   await fs.mkdir(options.runDir, { recursive: true });
   await fs.mkdir(options.profileDir, { recursive: true });
@@ -2946,6 +3071,8 @@ async function runVncBrowserServer(options) {
       initialPage,
       server: undefined,
       shuttingDown: false,
+      runtimeStopped: false,
+      terminalReason: "",
       lastSave: undefined,
       childProcesses
     };

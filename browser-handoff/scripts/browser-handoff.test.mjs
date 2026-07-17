@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -80,6 +81,30 @@ function futureIso() {
   return new Date(Date.now() + 3_600_000).toISOString();
 }
 
+function pastIso() {
+  return new Date(Date.now() - 60_000).toISOString();
+}
+
+async function getFreePort() {
+  const server = net.createServer();
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  const port = address.port;
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.close(resolve);
+  });
+
+  return port;
+}
+
 function spawnFakeChromiumForProfile(profileDir) {
   return spawn(
     process.execPath,
@@ -128,6 +153,63 @@ function writeSessionRecord(recordPath, profileDir, payload = {}) {
   );
 }
 
+function spawnTerminalServe(tmpDir, profileDir, activeStatePath, port, extraArgs = []) {
+  return spawn(
+    process.execPath,
+    [
+      scriptPath,
+      "http://example.invalid",
+      "--serve",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(port),
+      "--token",
+      "test-token",
+      "--active-id",
+      "test-active-id",
+      "--active-state",
+      activeStatePath,
+      "--artifacts-dir",
+      path.join(tmpDir, "artifacts"),
+      "--profile-dir",
+      profileDir,
+      "--storage-state",
+      path.join(tmpDir, "storage-state.json"),
+      ...extraArgs
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, BROWSER_HANDOFF_ACTIVE_STATE: "" },
+      stdio: ["ignore", "pipe", "pipe"]
+    }
+  );
+}
+
+async function waitForTerminalStatus(port, expectedReason) {
+  const deadline = Date.now() + 3_000;
+  let lastError;
+
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/status?token=test-token`);
+      const body = await response.json();
+
+      if (response.status === 410 && body.reason === expectedReason) {
+        return body;
+      }
+
+      lastError = new Error(`Unexpected terminal response: ${response.status} ${JSON.stringify(body)}`);
+    } catch (error) {
+      lastError = error;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  throw lastError || new Error("Timed out waiting for terminal handoff status.");
+}
+
 function runServeStartup(tmpDir, profileDir, env = {}) {
   return runWithEnv(
     env,
@@ -141,6 +223,8 @@ function runServeStartup(tmpDir, profileDir, env = {}) {
     path.join(tmpDir, "storage-state.json"),
     "--active-state",
     path.join(tmpDir, "active.json"),
+    "--active-id",
+    "test-active-id",
     "--xvfb",
     "/bin/false",
     "--x11vnc",
@@ -337,4 +421,98 @@ test("startup cleanup preserves a stale-looking process with reachable session C
   assert.equal(result.status, 1);
   assert.doesNotMatch(result.stderr, /Cleaned 1 stale Chromium process/);
   assert.equal(childIsAlive(child), true);
+});
+
+test("serve mode keeps an already stopped session terminal without rewriting timestamps", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-handoff-terminal-stopped-"));
+  const profileDir = path.join(tmpDir, "profile");
+  const activeStatePath = path.join(tmpDir, "active.json");
+  const port = await getFreePort();
+  const timestamp = oldIso();
+  const stoppedRecord = {
+    activeId: "test-active-id",
+    status: "stopped",
+    targetUrl: "http://example.invalid",
+    controlUrl: "",
+    stopUrl: "",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    lastActivityAt: timestamp,
+    stoppedAt: timestamp,
+    expiresAt: futureIso(),
+    artifactsDir: path.join(tmpDir, "artifacts"),
+    runDir: path.join(tmpDir, "artifacts", "runs", "old"),
+    profileDir,
+    storageStatePath: path.join(tmpDir, "storage-state.json"),
+    controlMode: "vnc",
+    cdpEndpoint: "",
+    viewport: { width: 1440, height: 960 }
+  };
+
+  fs.mkdirSync(path.dirname(activeStatePath), { recursive: true });
+  fs.writeFileSync(activeStatePath, `${JSON.stringify(stoppedRecord, null, 2)}\n`, { mode: 0o600 });
+
+  const child = spawnTerminalServe(tmpDir, profileDir, activeStatePath, port, ["--expires-at", futureIso()]);
+
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+      await waitForChildExit(child);
+    }
+
+    fs.rmSync(tmpDir, { force: true, recursive: true });
+  });
+
+  const body = await waitForTerminalStatus(port, "stopped");
+  assert.equal(body.status, "stopped");
+  assert.equal(childIsAlive(child), true);
+
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  assert.deepEqual(JSON.parse(fs.readFileSync(activeStatePath, "utf8")), stoppedRecord);
+});
+
+test("serve mode marks an expired running session stopped once and remains terminal", async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "browser-handoff-terminal-expired-"));
+  const profileDir = path.join(tmpDir, "profile");
+  const activeStatePath = path.join(tmpDir, "active.json");
+  const port = await getFreePort();
+  const timestamp = oldIso();
+
+  writeSessionRecord(activeStatePath, profileDir, {
+    targetUrl: "http://example.invalid",
+    controlUrl: "https://example.invalid/?token=test-token",
+    stopUrl: "https://example.invalid/stop?token=test-token",
+    updatedAt: timestamp,
+    lastActivityAt: timestamp,
+    expiresAt: pastIso(),
+    cdpEndpoint: "http://127.0.0.1:9"
+  });
+
+  const child = spawnTerminalServe(tmpDir, profileDir, activeStatePath, port, ["--expires-at", pastIso()]);
+
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+      await waitForChildExit(child);
+    }
+
+    fs.rmSync(tmpDir, { force: true, recursive: true });
+  });
+
+  const body = await waitForTerminalStatus(port, "expired");
+  assert.equal(body.status, "stopped");
+  assert.equal(childIsAlive(child), true);
+
+  const stoppedRecord = JSON.parse(fs.readFileSync(activeStatePath, "utf8"));
+  assert.equal(stoppedRecord.status, "stopped");
+  assert.equal(stoppedRecord.controlUrl, "");
+  assert.equal(stoppedRecord.stopUrl, "");
+  assert.equal(stoppedRecord.cdpEndpoint, "");
+  assert.equal(stoppedRecord.updatedAt, stoppedRecord.stoppedAt);
+  assert.notEqual(stoppedRecord.updatedAt, timestamp);
+
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  assert.deepEqual(JSON.parse(fs.readFileSync(activeStatePath, "utf8")), stoppedRecord);
 });
