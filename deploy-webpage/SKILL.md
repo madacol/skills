@@ -1,6 +1,6 @@
 ---
 name: deploy-webpage
-description: Use when a webpage, static build, or small web app needs a browser-accessible URL.
+description: Use when a webpage, static build, or small web app needs a browser-accessible URL and its validated URLs should be published to the current channel description.
 ---
 
 # Deploy Webpage
@@ -54,5 +54,28 @@ site-manager deploy <project>/website.json
 curl -I --max-time 15 https://<host>
 ```
 
+## Publish URLs to the Current Channel
+
+After deployment and URL validation succeed, collect the browser-accessible
+URLs for the access modes the user authorized. Include a token/share URL only
+when the user explicitly requested token access; anyone who can read the
+channel description can use that bearer link.
+
+Run the bundled publisher with each validated URL as a separate argument:
+
+```sh
+node <skill-directory>/scripts/publish-channel-urls.mjs <url> [<url> ...]
+```
+
+Replace `<skill-directory>` with the directory containing this `SKILL.md`. The
+publisher reads the current invocation-bound description, preserves it exactly,
+appends only URLs that are not already exact full lines, and calls the setter
+only when the description changes. It emits a JSON result with `status`,
+`description`, and `added` fields.
+
+If description publication fails, the deployment remains successful. Report
+the publication failure without claiming that the description was updated.
+
 Say which path was used, which files changed, the served host/path/port, and
-which validation or deploy commands passed.
+which validation or deploy commands passed. Also say which URLs were added to
+the channel description, or that it was already current.

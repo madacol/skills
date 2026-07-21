@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deploy Webpage"
+  short_description: "Deploy webpages and publish their URLs"
+  default_prompt: "Use $deploy-webpage to publish this webpage and share its accessible URLs."
