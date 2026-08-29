@@ -1,46 +1,104 @@
 ---
 name: manage-tasks
-description: "Use when work needs durable state across turns or sessions: task briefs, evidence, blockers, acceptance criteria, or completion records."
+description: Use when work needs durable task state across turns or sessions.
 ---
 
-# Manage Tasks
+# Manage tasks
 
-## Purpose
+Keep one canonical Markdown file per task:
 
-Use task tracking as durable working memory, not as a vague reminder list. The index should stay brief; the linked task file should contain the evidence-backed task brief needed to resume work without chat history.
+```text
+tasks/
+  open/
+  closed/
+```
 
-## Core Workflow
+Use `tasks/open/<task-id>.md` while work may continue. Move the same file to `tasks/closed/` when it is done or canceled.
 
-1. Keep the task index brief and scannable. Track only pending, active, and blocked work there.
-2. Create or update a task file for any non-trivial task, any ambiguous task, or any task with useful context, evidence, decisions, constraints, blockers, or acceptance criteria.
-3. Write the task file precisely. Treat user wording as evidence, not authoritative terminology. Infer the intended subject from nearby context.
-4. If the subject or owner layer is ambiguous, record the ambiguity and plausible interpretations. Do not implement behavior-changing work until the ambiguity is resolved by evidence or clarification.
-5. Preserve high-signal evidence in the task file or linked evidence files. Evidence may be short or long; include whatever materially helps future work, but organize it so the task brief remains usable.
-6. Keep task state synchronized: when a task is active, blocked, pending, or complete, update the index and task file together.
-7. When complete, remove the task from the index, move its task file under the done area, and add a concise done entry. Do not delete completed task files.
+Use one source for each fact:
 
-## Task File Requirements
+- Filename is the task ID.
+- First H1 is the title.
+- Frontmatter stores current status, an active decision, an external wait, and task dependencies.
+- Markdown sections store the outcome, context, evidence, constraints, acceptance criteria, completion, cancellation, and resolved decisions.
+- Git history supplies update history.
 
-A task file should make these things clear enough for a future agent to continue:
+## Validation
 
-- the inferred subject of the task;
-- what is known, what is inferred, and what remains ambiguous;
-- the evidence supporting the current understanding;
-- constraints, non-goals, owner layer, and safety concerns;
-- the next action or blocker;
-- acceptance criteria for completion;
-- completion notes and verification when archived.
+The bundled validator is dependency-free Node.js:
 
-Use headings that fit the task. Prefer clarity and evidence over a rigid template.
+```sh
+node <skill-directory>/scripts/validate-tasks.mjs tasks
+```
 
-## Ambiguity Discipline
+Run it once before ending any turn that created, edited, moved, or closed a task record. It does not need to run after each individual change.
 
-Ambiguous tasks may be recorded immediately so they are not lost, but ambiguity must be visible in the task file and must constrain action. If multiple plausible subjects remain, list them with evidence and state what would disambiguate them. Avoid turning a vague task into implementation work by silently choosing a convenient interpretation.
+## Statuses
 
-## Evidence Discipline
+| Status | Use | Folder |
+|---|---|---|
+| `todo` | Accepted and ready, not started | `open/` |
+| `in_progress` | Work can continue now | `open/` |
+| `awaiting_decision` | The user must answer one question | `open/` |
+| `waiting` | An external event or resource is required | `open/` |
+| `done` | Outcome met with completion evidence | `closed/` |
+| `canceled` | Stopped without meeting the outcome | `closed/` |
 
-Include evidence when it changes how the task should be understood or executed. Evidence can include user statements, logs, screenshots, command output, traces, file paths, decisions, failed attempts, or any other useful source. When the user attaches media or quotes a message as the reason for a task, reference that media or quote in the task file, including its path when available. Keep the main task file readable; split large evidence into linked files when that improves scanability.
+## Record format
 
-## Completion Discipline
+```markdown
+---
+status: todo
+---
 
-A completed task should leave enough context to understand what was done and why. Archive the task file instead of deleting it. The done entry should be concise, but the archived task file should retain the durable task brief, important evidence, and verification.
+# Task title
+
+## Outcome
+
+Observable result.
+```
+
+Add body sections only when they carry information needed to resume the task. Record facts, uncertainty, evidence, constraints, acceptance criteria, and relevant history.
+
+## Conditional fields
+
+`awaiting_decision` requires one active decision:
+
+```yaml
+status: awaiting_decision
+decision:
+  question: What should happen?
+  options:
+    first:
+      label: First option
+      description: Result of choosing it.
+    second:
+      label: Second option
+      description: Result of choosing it.
+  recommendation: first
+```
+
+Keep the active question and options only in frontmatter. When resolved, add the question, answer, and rationale once to the body, then remove `decision`.
+
+`waiting` requires one `waiting_for` string. Remove it before changing to another status.
+
+```yaml
+status: waiting
+waiting_for: The required device becomes available
+```
+
+`blocked_by` lists existing task IDs. It is independent of status.
+
+```yaml
+blocked_by:
+  - prerequisite-task
+```
+
+Before setting the status to `done`, add a non-empty `## Completion` section with verification evidence. Before setting it to `canceled`, add a non-empty `## Cancellation` section with the reason. Reopening preserves that history and moves the same file back to `open/`.
+
+## Workflow
+
+1. Search `open/` and `closed/` before creating a task.
+2. Create a task for work or evidence that must survive the current turn.
+3. Keep its record sufficient for a fresh agent to resume without chat history.
+4. Prepare required decision history, wait removal, completion, or cancellation before changing status.
