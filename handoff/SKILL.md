@@ -1,7 +1,6 @@
 ---
 name: handoff
-description: Use when another agent or session needs a compact continuation document for the current conversation.
-argument-hint: "What will the next session be used for?"
+description: Create a compact continuation document when the user asks to hand work off to another agent or session. Use only for writing a new handoff.
 ---
 
 Write a handoff document summarising the current conversation so a fresh agent can continue the work. Save to the temporary directory of the user's OS - not the current workspace.
