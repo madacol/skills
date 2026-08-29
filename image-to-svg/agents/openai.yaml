@@ -1,0 +1,4 @@
+interface:
+  display_name: "Convert Images to SVG"
+  short_description: "Vector reconstruction with self-verification"
+  default_prompt: "Use $image-to-svg to reconstruct this image as an editable SVG and verify it visually."
