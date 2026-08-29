@@ -1,0 +1,4 @@
+interface:
+  display_name: "Send Email"
+  short_description: "Send mail through the configured local Postfix"
+  default_prompt: "Use $send-email to send a message with the correct configured domain and verify its delivery."
