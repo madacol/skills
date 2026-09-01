@@ -5,13 +5,13 @@ description: Use when work needs durable task state across turns or sessions.
 
 # Manage tasks
 
-Keep one canonical Markdown file per task:
+Set up and register the task store with this idempotent command:
 
-```text
-tasks/
-  open/
-  closed/
+```sh
+node <skill-directory>/scripts/setup-task-store.mjs <workspace-directory> <project-slug>
 ```
+
+Dashboard: `https://task.babyjarvis.com/<project-slug>/`
 
 Use `tasks/open/<task-id>.md` while work may continue. Move the same file to `tasks/closed/` when it is done or canceled.
 
