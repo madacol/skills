@@ -82,6 +82,14 @@ Observable result.
 
 Add body sections only when they carry information needed to resume the task. Record facts, uncertainty, evidence, constraints, acceptance criteria, and relevant history.
 
+## Evidence media
+
+Use standard Markdown image syntax for visual evidence so the task dashboard can display it:
+
+```markdown
+![Concise description of the visible evidence](/home/mada/chat/<channel>/.media/<image-file>)
+```
+
 ## Conditional fields
 
 `awaiting_decision` requires one active decision:

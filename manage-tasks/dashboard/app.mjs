@@ -1,4 +1,5 @@
 import { parseTaskMarkdown } from "./task-parser.mjs";
+import { renderMarkdown } from "./markdown-renderer.mjs";
 import { TASK_STATUS_INFO } from "./task-statuses.mjs";
 
 const state = { tasks: [], query: "" };
@@ -114,6 +115,17 @@ function metadataRows(task) {
   return rows;
 }
 
+/**
+ * @param {{ collection: string, filename: string }} task
+ * @param {string} href
+ */
+function taskImageHref(task, href) {
+  if (!href.startsWith("/home/mada/chat/")) return href;
+  const endpoint = new URL(`/${encodeURIComponent(projectId)}/evidence/${encodeURIComponent(task.collection)}/${encodeURIComponent(task.filename)}`, location.origin);
+  endpoint.searchParams.set("path", href);
+  return `${endpoint.pathname}${endpoint.search}`;
+}
+
 function showTask(task) {
   elements.dialogId.textContent = task.id;
   elements.dialogTitle.textContent = task.title;
@@ -129,9 +141,10 @@ function showTask(task) {
     if (!content) continue;
     const section = document.createElement("section");
     section.append(textElement("h3", "", name.replaceAll("_", " ")));
-    for (const paragraph of content.split(/\n\s*\n/gu)) {
-      section.append(textElement("p", "", paragraph.replace(/\n/gu, " ")));
-    }
+    const markdown = document.createElement("div");
+    markdown.className = "markdown";
+    markdown.innerHTML = renderMarkdown(content, { resolveImageHref: (href) => taskImageHref(task, href) });
+    section.append(markdown);
     elements.dialogBody.append(section);
   }
   elements.dialog.showModal();
@@ -168,6 +181,7 @@ async function loadTasks() {
       const parts = file.split("/");
       return {
         id: decodeURIComponent(parts.at(-1)).replace(/\.md$/u, ""),
+        filename: decodeURIComponent(parts.at(-1)),
         collection: parts.at(-2),
         status: parsed.metadata.status,
         metadata: parsed.metadata,
