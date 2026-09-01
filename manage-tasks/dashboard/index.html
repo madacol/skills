@@ -27,7 +27,6 @@
           <div class="metric"><span id="open-count">0</span><small>Open</small></div>
           <div class="metric"><span id="active-count">0</span><small>In progress</small></div>
           <div class="metric"><span id="attention-count">0</span><small>Need attention</small></div>
-          <div class="metric muted"><span id="closed-count">0</span><small>Closed</small></div>
         </section>
 
         <section class="workspace">
@@ -37,19 +36,14 @@
               <span class="sr-only">Search tasks</span>
               <input id="search" type="search" placeholder="Search tasks" autocomplete="off">
             </label>
-            <div class="filters" id="filters" aria-label="Filter by collection">
-              <button class="filter selected" type="button" data-filter="open">Open</button>
-              <button class="filter" type="button" data-filter="all">All</button>
-              <button class="filter" type="button" data-filter="closed">Closed</button>
-            </div>
           </div>
 
           <div class="notice error" id="error" hidden></div>
           <div class="notice warning" id="warnings" hidden></div>
           <div class="task-grid" id="task-grid" aria-live="polite"></div>
           <div class="empty" id="empty" hidden>
-            <p>No tasks match this view.</p>
-            <span>Try another filter or search term.</span>
+            <p>No open tasks match.</p>
+            <span>Try another search term.</span>
           </div>
         </section>
       </main>

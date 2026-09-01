@@ -52,15 +52,12 @@ async function registeredProjects(projectsRoot) {
 
 async function projectTaskFiles(projectId, project) {
   const files = new Map();
-  for (let index = 0; index < project.directories.length; index += 1) {
-    const collection = ["open", "closed"][index];
-    const directory = project.directories[index];
-    const entries = await readdir(directory, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
-      const url = `/${encodeURIComponent(projectId)}/tasks/${collection}/${encodeURIComponent(entry.name)}`;
-      files.set(url, path.join(directory, entry.name));
-    }
+  const directory = project.directories[0];
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+    const url = `/${encodeURIComponent(projectId)}/tasks/open/${encodeURIComponent(entry.name)}`;
+    files.set(url, path.join(directory, entry.name));
   }
   return files;
 }

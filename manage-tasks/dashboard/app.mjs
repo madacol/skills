@@ -1,7 +1,7 @@
 import { parseTaskMarkdown } from "./task-parser.mjs";
 import { TASK_STATUS_INFO } from "./task-statuses.mjs";
 
-const state = { tasks: [], filter: "open", query: "" };
+const state = { tasks: [], query: "" };
 const projectId = decodeURIComponent(location.pathname.split("/").filter(Boolean)[0] ?? "");
 
 const elements = {
@@ -12,7 +12,6 @@ const elements = {
   refreshed: document.querySelector("#refreshed"),
   refresh: document.querySelector("#refresh"),
   search: document.querySelector("#search"),
-  filters: document.querySelector("#filters"),
   dialog: document.querySelector("#task-dialog"),
   dialogId: document.querySelector("#dialog-id"),
   dialogTitle: document.querySelector("#dialog-title"),
@@ -38,7 +37,6 @@ function excerpt(value, maxLength = 190) {
 }
 
 function matches(task) {
-  if (state.filter !== "all" && task.collection !== state.filter) return false;
   if (!state.query) return true;
   const searchable = [task.id, task.title, task.status, ...Object.values(task.sections), JSON.stringify(task.metadata)].join(" ").toLowerCase();
   return searchable.includes(state.query);
@@ -77,7 +75,7 @@ function taskCard(task) {
   const footer = document.createElement("div");
   footer.className = "card-footer";
   footer.append(
-    textElement("span", "collection", task.collection === "open" ? "Open task" : "Closed task"),
+    textElement("span", "collection", "Open task"),
     textElement("span", "view-link", "View details →"),
   );
   card.append(footer);
@@ -100,10 +98,9 @@ function render() {
 }
 
 function renderCounts() {
-  document.querySelector("#open-count").textContent = state.tasks.filter((task) => task.collection === "open").length;
+  document.querySelector("#open-count").textContent = state.tasks.length;
   document.querySelector("#active-count").textContent = state.tasks.filter((task) => task.status === "in_progress").length;
   document.querySelector("#attention-count").textContent = state.tasks.filter((task) => TASK_STATUS_INFO[task.status]?.needsAttention).length;
-  document.querySelector("#closed-count").textContent = state.tasks.filter((task) => task.collection === "closed").length;
 }
 
 function metadataRows(task) {
@@ -216,13 +213,6 @@ async function mapWithConcurrency(items, concurrency, mapper) {
 elements.refresh.addEventListener("click", loadTasks);
 elements.search.addEventListener("input", (event) => {
   state.query = event.target.value.trim().toLowerCase();
-  render();
-});
-elements.filters.addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-filter]");
-  if (!button) return;
-  state.filter = button.dataset.filter;
-  for (const candidate of elements.filters.querySelectorAll("button")) candidate.classList.toggle("selected", candidate === button);
   render();
 });
 document.querySelector("#close-dialog").addEventListener("click", () => elements.dialog.close());

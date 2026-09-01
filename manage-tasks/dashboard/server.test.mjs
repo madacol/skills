@@ -15,6 +15,7 @@ test("follows project symlinks, serves raw Markdown live, and rejects writes", a
   await mkdir(projectsRoot);
   const taskFile = path.join(taskRoot, "open", "ship-fix.md");
   await writeFile(taskFile, "---\nstatus: todo\n---\n\n# ship-fix\n\n## Outcome\n\nObservable result.\n");
+  await writeFile(path.join(taskRoot, "closed", "old-task.md"), "---\nstatus: done\n---\n\n# Old task\n\n## Outcome\n\nAlready finished.\n");
   await symlink(taskRoot, path.join(projectsRoot, "alpha-project"), "dir");
   await mkdir(path.join(projectsRoot, "copied-project"));
   const incompleteRoot = path.join(temporary, "incomplete-store");
@@ -46,6 +47,7 @@ test("follows project symlinks, serves raw Markdown live, and rejects writes", a
   const first = await fetch(`${baseUrl}/alpha-project/tasks/open/ship-fix.md`);
   assert.equal(first.status, 200);
   assert.match(await first.text(), /# ship-fix/u);
+  assert.equal((await fetch(`${baseUrl}/alpha-project/tasks/closed/old-task.md`)).status, 200);
 
   await writeFile(taskFile, "---\nstatus: todo\n---\n\n# Updated title\n\n## Outcome\n\nFresh from Markdown.\n");
   const second = await fetch(`${baseUrl}/alpha-project/tasks/open/ship-fix.md`);
