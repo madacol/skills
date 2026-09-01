@@ -64,7 +64,7 @@ async function projectTaskFiles(projectId, project) {
 
 function projectIndex(projectIds) {
   const links = projectIds.map((projectId) => `<li><a href="/${projectId}/">${projectId}</a></li>`).join("");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Task projects</title><style>body{max-width:42rem;margin:4rem auto;padding:0 1.25rem;background:#f3f0e8;color:#17211c;font:16px system-ui}h1{font:3rem Georgia,serif}a{color:#246b4e}li{margin:.75rem 0}</style></head><body><h1>Task projects</h1><ul>${links}</ul></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><meta name="theme-color" content="#0d1310"><title>Task projects</title><style>body{max-width:42rem;margin:4rem auto;padding:0 1.25rem;background:#0d1310;color:#edf4ef;font:16px system-ui}h1{font:3rem Georgia,serif}a{color:#6fd0a0}li{margin:.75rem 0}</style></head><body><h1>Task projects</h1><ul>${links}</ul></body></html>`;
 }
 
 export function createDashboardHubServer(projectsRoot = DEFAULT_PROJECTS_ROOT) {
