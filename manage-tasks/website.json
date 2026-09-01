@@ -1,0 +1,12 @@
+{
+  "subdomain": "task",
+  "access": {
+    "mode": "tailnet"
+  },
+  "service": {
+    "command": [
+      "/usr/bin/node",
+      "dashboard/server.mjs"
+    ]
+  }
+}
