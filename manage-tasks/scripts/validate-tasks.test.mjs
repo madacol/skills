@@ -57,6 +57,31 @@ test("requires waiting_for only while waiting", async (t) => {
   await assert.rejects(validateTaskStore(root), /waiting_for is allowed only for waiting/);
 });
 
+test("validates composite Session and agent ownership only for active work", async (t) => {
+  const root = await fixture(t);
+  await record(root, "open", "active-task", "status: in_progress\nowner: 8e25a58d/root/status_tests/reviewer");
+  await validateTaskStore(root);
+
+  await record(root, "open", "active-task", "status: in_progress\nowner: 01a05731");
+  await validateTaskStore(root);
+
+  await record(root, "open", "active-task", "status: in_progress\nowner: 8E25A58D/root");
+  await assert.rejects(validateTaskStore(root), /Session fingerprint/);
+
+  await record(root, "open", "active-task", "status: in_progress\nowner: 8e25a58d/reviewer");
+  await assert.rejects(validateTaskStore(root), /canonical agent path/);
+
+  await record(root, "open", "active-task", "status: todo\nowner: 8e25a58d/root");
+  await assert.rejects(validateTaskStore(root), /owner is allowed only for in_progress/);
+});
+
+test("allows one agent to own multiple active tasks", async (t) => {
+  const root = await fixture(t);
+  await record(root, "open", "first-active", "status: in_progress\nowner: 8e25a58d/root");
+  await record(root, "open", "second-active", "status: in_progress\nowner: 8e25a58d/root");
+  await validateTaskStore(root);
+});
+
 test("rejects missing dependencies and dependency cycles", async (t) => {
   const root = await fixture(t);
   await record(root, "open", "first-task", "status: todo\nblocked_by:\n  - second-task");
@@ -87,8 +112,8 @@ test("requires outcome and completion or cancellation evidence", async (t) => {
   });
 });
 
-test("allows additional frontmatter fields", async (t) => {
+test("allows unrelated additional frontmatter fields", async (t) => {
   const root = await fixture(t);
-  await record(root, "open", "ship-fix", "status: todo\nowner: platform\npriority: high");
+  await record(root, "open", "ship-fix", "status: todo\npriority: high");
   await validateTaskStore(root);
 });

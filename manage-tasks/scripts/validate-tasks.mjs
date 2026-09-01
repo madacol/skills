@@ -10,6 +10,7 @@ const OPEN_STATUSES = new Set(Object.entries(TASK_STATUS_INFO).filter(([, info])
 const CLOSED_STATUSES = new Set(Object.entries(TASK_STATUS_INFO).filter(([, info]) => info.collection === "closed").map(([status]) => status));
 const ALL_STATUSES = new Set(Object.keys(TASK_STATUS_INFO));
 const TASK_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+const OWNER_PATTERN = /^[0-9a-f]{8}(?:\/root(?:\/[a-z0-9_]+)*)?$/u;
 
 export class TaskValidationError extends Error {}
 
@@ -65,6 +66,15 @@ function validateRecord(record) {
   if (record.status === "canceled" && !sections.cancellation) errors.push(`${record.path}: canceled requires a non-empty ## Cancellation section`);
 
   validateDecision(record, errors);
+  const owner = record.metadata.owner;
+  if (owner != null) {
+    if (record.status !== "in_progress") {
+      errors.push(`${record.path}: owner is allowed only for in_progress`);
+    }
+    if (typeof owner !== "string" || !OWNER_PATTERN.test(owner)) {
+      errors.push(`${record.path}: owner must be an eight-character lowercase hexadecimal Session fingerprint, with new owners followed by a canonical agent path such as /root or /root/tests`);
+    }
+  }
   const waitingFor = record.metadata.waiting_for;
   if (record.status === "waiting") {
     if (!nonemptyString(waitingFor)) errors.push(`${record.path}: waiting requires one non-empty waiting_for string`);
