@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Task ledger</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/app.mjs"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow" id="project-name">Task project</p>
+          <h1>Task ledger</h1>
+          <p class="subtitle">A live, read-only view of the files already on disk.</p>
+        </div>
+        <button class="refresh" id="refresh" type="button">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-15.5-3M4 3v5h5M4 13a8.1 8.1 0 0 0 15.5 3M20 21v-5h-5"/></svg>
+          Refresh
+        </button>
+      </header>
+
+      <main>
+        <section class="summary" aria-label="Task summary">
+          <div class="metric"><span id="open-count">0</span><small>Open</small></div>
+          <div class="metric"><span id="active-count">0</span><small>In progress</small></div>
+          <div class="metric"><span id="attention-count">0</span><small>Need attention</small></div>
+          <div class="metric muted"><span id="closed-count">0</span><small>Closed</small></div>
+        </section>
+
+        <section class="workspace">
+          <div class="toolbar">
+            <label class="search">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+              <span class="sr-only">Search tasks</span>
+              <input id="search" type="search" placeholder="Search tasks" autocomplete="off">
+            </label>
+            <div class="filters" id="filters" aria-label="Filter by collection">
+              <button class="filter selected" type="button" data-filter="open">Open</button>
+              <button class="filter" type="button" data-filter="all">All</button>
+              <button class="filter" type="button" data-filter="closed">Closed</button>
+            </div>
+          </div>
+
+          <div class="notice error" id="error" hidden></div>
+          <div class="notice warning" id="warnings" hidden></div>
+          <div class="task-grid" id="task-grid" aria-live="polite"></div>
+          <div class="empty" id="empty" hidden>
+            <p>No tasks match this view.</p>
+            <span>Try another filter or search term.</span>
+          </div>
+        </section>
+      </main>
+
+      <footer>
+        <span id="refreshed">Loading tasks...</span>
+        <span>Read only · Markdown remains canonical</span>
+      </footer>
+    </div>
+
+    <dialog id="task-dialog">
+      <div class="dialog-head">
+        <div>
+          <p class="dialog-id" id="dialog-id"></p>
+          <h2 id="dialog-title"></h2>
+        </div>
+        <button class="close" id="close-dialog" type="button" aria-label="Close task details">×</button>
+      </div>
+      <div class="dialog-meta" id="dialog-meta"></div>
+      <div class="dialog-body" id="dialog-body"></div>
+    </dialog>
+  </body>
+</html>
