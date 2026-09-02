@@ -12,7 +12,7 @@ function titleFor(name) {
 }
 
 function skillTemplate(name, description) {
-  return `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\n\n# ${titleFor(name)}\n\n<!-- SKILL-CREATOR:TODO Replace this comment with the instructions a fresh-context agent needs. -->\n`;
+  return `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\n\n# ${titleFor(name)}\n\n<!-- SKILL-CREATOR:TODO Add only the instructions a fresh-context agent needs for the intended use cases. -->\n`;
 }
 
 async function existingSkill(source, name, description) {

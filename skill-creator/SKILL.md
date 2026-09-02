@@ -11,8 +11,9 @@ Before writing files, inspect nearby skills and settle:
 
 - The concrete situations that should trigger this skill.
 - What similar skills already handle and where this skill stops.
-- The smallest workflow a fresh-context agent needs to produce the result.
 - Which behavior belongs in scripts because prose would make every agent reimplement it.
+
+Draft from the perspective of a fresh-context agent handling one representative main use case. Include only the information and actions that agent needs to finish correctly. Check the other intended use cases, then add only the differences they require. Remove background, implementation details, and explanations that do not change what the agent must do.
 
 Choose a lowercase kebab-case name. Write the description as routing guidance based on user situations or agent problems, not as a summary of the skill name.
 
