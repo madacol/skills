@@ -1,36 +1,19 @@
 ---
 name: skill-creator
-description: Use when creating a new standalone skill or turning an informal agent workflow into a reusable skill directory with clear routing, concise instructions, validation, and tests.
+description: Use when creating a standalone skill or turning an agent workflow into reusable skill instructions.
 ---
 
 # Create a skill
 
-Use this workflow for a standalone skill directory. Creating a plugin bundle, marketplace entry, or plugin manifest belongs to the plugin-creation workflow instead.
+Create `<skills-root>/<skill-name>/SKILL.md` with lowercase kebab-case names and this frontmatter:
 
-Before writing files, inspect nearby skills and settle:
-
-- The concrete situations that should trigger this skill.
-- What similar skills already handle and where this skill stops.
-- Which behavior belongs in scripts because prose would make every agent reimplement it.
-
-Draft from the perspective of a fresh-context agent handling one representative main use case. Include only the information and actions that agent needs to finish correctly. Check the other intended use cases, then add only the differences they require. Remove background, implementation details, and explanations that do not change what the agent must do.
-
-Choose a lowercase kebab-case name. Write the description as routing guidance based on user situations or agent problems, not as a summary of the skill name.
-
-Scaffold without overwriting existing work:
-
-```sh
-node <skill-directory>/scripts/create-skill.mjs <skills-root> <skill-name> --description "<routing description>"
+```yaml
+---
+name: skill-name
+description: Describe the situations that should trigger this skill.
+---
 ```
 
-Replace the generated placeholder. Keep `SKILL.md` focused on decisions and actions that apply every time. Put conditional detail in linked reference files. Put deterministic or error-prone behavior in tested scripts. Add assets or templates only when agents should reuse them verbatim.
+Write from the perspective of a fresh-context agent handling one representative main use case. Include only what that agent needs to finish correctly. Check the other intended use cases and add only their required differences.
 
-Use relative Markdown links for skill-local resources. Resolve them from the directory containing `SKILL.md`.
-
-Validate the finished skill:
-
-```sh
-node <skill-directory>/scripts/validate-skill.mjs <new-skill-directory>
-```
-
-Then verify any bundled scripts, test routing with fresh-context scenarios that include both positive and near-miss cases, and confirm the intended runtime discovers the directory from its skill root. Review the diff for unnecessary instructions or overlap. Keep unrelated changes out of the commit.
+Inspect nearby skill descriptions to avoid overlap. Add references, scripts, assets, or tests only when the intended use cases require them. Remove background and implementation details that do not change the agent's actions.
