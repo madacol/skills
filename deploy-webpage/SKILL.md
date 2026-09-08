@@ -1,6 +1,6 @@
 ---
 name: deploy-webpage
-description: Use to learn how to put a webpage at a URL the user can open when they ask to publish, deploy, or share it, or when you need to show them an HTML page.
+description: Learn how to put a webpage at a URL the user can open when they ask to publish, deploy, or share it, or when you need to show them an HTML page.
 ---
 
 # Deploy Webpage
