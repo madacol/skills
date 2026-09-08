@@ -1,6 +1,6 @@
 ---
 name: deploy-webpage
-description: Use when a webpage, static build, or small web app needs a browser-accessible URL and its validated URLs should be published to the current channel description.
+description: Use to learn how to make a webpage browser-accessible when the user asks to publish, deploy, or share it, or when an agent needs to show the user an HTML page.
 ---
 
 # Deploy Webpage
