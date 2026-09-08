@@ -1,6 +1,6 @@
 ---
 name: domain-modeling
-description: Use when clarifying domain terminology, ownership, constraints, or durable architectural decisions.
+description: Use to learn how to document domain terminology, ownership, constraints, and durable architectural decisions.
 ---
 
 # Domain Modeling

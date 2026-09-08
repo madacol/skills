@@ -1,6 +1,6 @@
 ---
 name: qa
-description: Use when the user wants to report bugs conversationally and capture each one as a durable ticket under `.scratch/`.
+description: Use to learn how to turn conversational bug reports into durable tickets.
 ---
 
 # QA Session

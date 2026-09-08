@@ -1,6 +1,6 @@
 ---
 name: tdd
-description: Use when the user wants test-first feature or bug work, red-green-refactor, or integration tests at agreed seams.
+description: Use to learn how to practice test-driven development, choose testing seams, and follow the red-green-refactor loop.
 ---
 
 # Test-Driven Development

@@ -1,6 +1,6 @@
 ---
 name: to-spec
-description: Use when settled conversation context should become an implementation-ready spec without another discovery interview.
+description: Use to learn how to turn settled context into an implementation-ready specification.
 disable-model-invocation: true
 ---
 

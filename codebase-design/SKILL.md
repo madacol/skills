@@ -1,6 +1,6 @@
 ---
 name: codebase-design
-description: Use when a new feature with substantial behavior needs a clear module boundary, logic is duplicated or scattered across callers, implementations need a shared contract, tests must reach into internals, or several interfaces could work. Helps shape a simple, testable interface around the behavior.
+description: Use to learn how to design codebases around deep modules, small interfaces, clean seams, locality, and testability.
 ---
 
 # Codebase Design

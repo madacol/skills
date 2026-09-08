@@ -1,6 +1,6 @@
 ---
 name: image-to-svg
-description: Recreate suitable flat or graphic raster references as clean, editable SVGs through semantic vector reconstruction and an iterative render-and-difference check. Use for logos, icons, emblems, diagrams, and flat illustrations; do not use as the default for photographs, textures, complex shading, or detail that only makes sense as pixels.
+description: Use to learn how to reconstruct suitable raster references as clean, editable SVGs.
 ---
 
 # Image-to-SVG Reconstruction

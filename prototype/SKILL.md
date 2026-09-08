@@ -1,6 +1,6 @@
 ---
 name: prototype
-description: Use when a throwaway logic or UI prototype would answer a design question before production implementation.
+description: Use to learn how to use throwaway logic and UI prototypes to answer design questions.
 ---
 
 # Prototype

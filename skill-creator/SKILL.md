@@ -1,6 +1,6 @@
 ---
 name: skill-creator
-description: Use when creating a standalone skill or turning an agent workflow into reusable skill instructions.
+description: Use to learn how the user prefers to shape skills.
 ---
 
 # Create a skill

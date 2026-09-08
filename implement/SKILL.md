@@ -1,6 +1,6 @@
 ---
 name: implement
-description: Use when implementing work from an agreed spec or ticket set through verification, review, and commit.
+description: Use to learn how to implement, verify, review, and commit agreed specs or tickets.
 disable-model-invocation: true
 ---
 

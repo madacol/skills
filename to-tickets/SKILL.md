@@ -1,6 +1,6 @@
 ---
 name: to-tickets
-description: Use when a conversation, plan, or spec needs to become agent-ready Markdown tickets under `.scratch/`.
+description: Use to learn how to turn conversations, plans, and specifications into agent-ready tickets.
 disable-model-invocation: true
 ---
 

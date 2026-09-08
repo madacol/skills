@@ -1,6 +1,6 @@
 ---
 name: unslop
-description: Cut AI tells from any writing. Must always apply.
+description: Use to learn how the user prefers writing to sound and which AI tells to remove.
 ---
 
 # Unslop

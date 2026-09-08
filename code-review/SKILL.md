@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Independent Standards-and-Spec review for complex changes at risk of repository-standard violations, scope drift, or missed spec/ticket requirements.
+description: Use to learn how to review complex changes against repository standards and their originating specification.
 ---
 
 Two-axis review of committed or working-tree changes since a fixed point:
