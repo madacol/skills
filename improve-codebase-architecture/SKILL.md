@@ -1,6 +1,6 @@
 ---
 name: improve-codebase-architecture
-description: Use when reviewing a codebase for deepening, consolidation, testability, or AI-navigability opportunities.
+description: Use to learn how to review codebases for deepening, consolidation, testability, and AI navigability.
 ---
 
 # Improve Codebase Architecture
@@ -54,6 +54,6 @@ Do NOT propose interfaces yet. After the file is written, ask the user: "Which o
 
 ### 3. Grilling loop
 
-Once the user picks a candidate, run `/grilling` and use `/domain-modeling` to record resolved domain knowledge.
+Once the user picks a candidate, run `/grill-me` and use `/domain-modeling` to record resolved domain knowledge.
 
 When the user wants to compare alternative interfaces, run `/codebase-design` and follow its design-it-twice workflow.
