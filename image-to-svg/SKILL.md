@@ -1,6 +1,6 @@
 ---
 name: image-to-svg
-description: Use to learn how to reconstruct suitable raster references as clean, editable SVGs.
+description: Learn how to reconstruct suitable raster references as clean, editable SVGs.
 ---
 
 # Image-to-SVG Reconstruction
