@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Use to learn how to write continuation documents for another agent or session.
+description: Learn how to give another agent or session the context needed to continue unfinished work.
 ---
 
 Write a handoff document summarising the current conversation so a fresh agent can continue the work. Save to the temporary directory of the user's OS - not the current workspace.
