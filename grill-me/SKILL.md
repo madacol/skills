@@ -1,6 +1,6 @@
 ---
 name: grill-me
-description: Learn how to grill the user one question at a time to turn a plan or design into an implementation-ready task.
+description: Learn how to grill the user one question at a time until you reach a shared understanding of their intent.
 disable-model-invocation: true
 ---
 
