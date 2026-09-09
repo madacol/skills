@@ -1,6 +1,6 @@
 ---
 name: grill-me
-description: Use when the user asks for a one-question-at-a-time interview to stress-test a plan or design.
+description: Learn how to grill the user one question at a time to turn a plan or design into an implementation-ready task.
 disable-model-invocation: true
 ---
 
