@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 Synthesize the settled product decisions from the existing conversation and codebase context. Ask one confirmation question about the proposed testing seams, then write the file.
 
-Use the convention in `docs/agents/work-files.md` and write `.scratch/<work-slug>/SPEC.md`.
+Write `.scratch/<work-slug>/SPEC.md`.
 
 ## Process
 
