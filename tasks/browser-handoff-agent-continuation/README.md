@@ -1,6 +1,10 @@
+---
+status: done
+---
+
 # Add agent continuation to browser handoff
 
-## Goal
+## Outcome
 
 Let a fresh agent reconnect to and continue browsing in the exact Chromium session controlled by the user through noVNC.
 
@@ -26,7 +30,7 @@ Let a fresh agent reconnect to and continue browsing in the exact Chromium sessi
 - CLI and live integration verification pass.
 - Standards and Spec review pass before commit.
 
-## Verification evidence
+## Completion
 
 - Public-seam tests passed for resume help and missing-session handling.
 - Live handoff launched Chromium, Xvfb, x11vnc, noVNC, and loopback CDP from the Bot Saca Citas pinned Playwright workspace.

@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # Align engineering skill workflows and terminology
 
 ## Goal
@@ -21,7 +25,7 @@ Remove the triage workflow and make the remaining engineering skills agree on im
 - Updated GitHub, GitLab, and local work-tracker templates while preserving platform-native `issue` terminology where it names actual platform primitives.
 - Deleted the triage skill and its obsolete setup configuration.
 
-## Verification
+## Completion
 
 - `git diff --check` passes.
 - Active Markdown contains no stale triage, PRD, local `issues/`, old TDD-loop, or remote-only Wayfinder language; remaining `issue` matches are platform-native.

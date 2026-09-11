@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # Move skills repository to .agents
 
 ## Outcome
@@ -8,7 +12,7 @@
 - Kept the external `send-files` symlink in the merged repository.
 - Backed up the original `.agents/skills` tree and Git metadata under `/tmp`.
 
-## Verification
+## Completion
 
 - Git reports `/home/mada/.agents/skills` as the repository root on `master` with the original remote.
 - The old `.codex/skills` path is not a Git repository; its visible `.git` entry is an empty sandbox placeholder.

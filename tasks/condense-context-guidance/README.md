@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # Condense context guidance
 
 ## Outcome
@@ -7,7 +11,7 @@
 - Removed the redundant generated domain-consumer document.
 - Preserved behavior while removing rationale and repeated routing details.
 
-## Verification
+## Completion
 
 - Affected standard-format skills pass validation.
 - No active skill references a separate glossary or `CONTEXT-MAP.md`.

@@ -1,6 +1,10 @@
+---
+status: done
+---
+
 # Make browser handoffs ephemeral
 
-## Goal
+## Outcome
 
 Replace per-handoff permanent deployments and retained browser artifacts with one stable gateway that owns temporary browser sessions and removes every session resource after completion.
 
@@ -47,7 +51,7 @@ Replace per-handoff permanent deployments and retained browser artifacts with on
 
 `b72682f17867450228e8c45b0f15d6939115d2ff`
 
-## Evidence
+## Completion
 
 - The removed deployment accumulated about 3.7 GB, including about 3.5 GB of Chromium BrowserMetrics, 51,263 run directories, and thousands of session locks.
 - Its systemd service used `Restart=always` and reached roughly 59,434 restarts while failing with `Active browser handoff changed before its CDP endpoint was recorded.`

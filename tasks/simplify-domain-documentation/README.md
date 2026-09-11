@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # Simplify domain documentation ownership
 
 ## Goal
@@ -13,7 +17,7 @@ Use `CONTEXT.md` as the sole project knowledge map and define terminology in the
 - Updated `grill-with-docs`, `to-spec`, `tdd`, `codebase-design`, and `setup-matt-pocock-skills` to use the same ownership model.
 - Kept `codebase-design`'s internal architecture glossary; it is vocabulary within that skill, not a project glossary document.
 
-## Verification
+## Completion
 
 - No active skill references `CONTEXT-MAP.md`, `docs/glossary.md`, or a project/domain glossary.
 - A fresh Codex prompt reports 27 discovered skills with no duplicate names.

@@ -1,6 +1,10 @@
+---
+status: done
+---
+
 # Standardize skill-description routing
 
-## Goal
+## Outcome
 
 Rewrite every tracked skill description as concise guidance that tells a fresh agent when the skill should be read or used.
 
@@ -12,7 +16,7 @@ Rewrite every tracked skill description as concise guidance that tells a fresh a
 - Frontmatter remains valid and every tracked skill retains exactly one description.
 - The completed diff passes Standards and Spec review.
 
-## Verification
+## Completion
 
 - Confirmed all 20 tracked descriptions begin with an invocation condition and each tracked skill retains exactly one description.
 - Confirmed each skill-file diff changes one description line and no procedure content.

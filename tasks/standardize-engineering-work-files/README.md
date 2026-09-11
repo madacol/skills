@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # Standardize engineering work files
 
 ## Goal
@@ -19,7 +23,7 @@ Standardize specs, tickets, QA reports, and Wayfinder maps as Markdown files und
 - Wayfinder ticket metadata is separated from the question body with YAML front matter.
 - Consolidated setup to `setup-matt-pocock-skills/work-files.md`.
 
-## Verification
+## Completion
 
 - `git diff --check` passes.
 - Active skill scans contain only the current file paths and actions.

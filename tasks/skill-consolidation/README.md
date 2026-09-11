@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # Consolidate duplicate architecture skills
 
 ## Goal
@@ -13,7 +17,7 @@ Keep one discoverable copy of each duplicated skill while preserving the custom 
 - Converted `grill-me` into a thin wrapper around `grilling`.
 - Moved the duplicate `.agents/skills` directories to `/tmp/agents-skills-dedup-backup-20260712`.
 
-## Verification
+## Completion
 
 - `git diff --check` passed.
 - Canonical skill references and delegated `codebase-design` files exist.
