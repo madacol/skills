@@ -14,21 +14,23 @@ test("follows project symlinks, serves raw Markdown and referenced image evidenc
   const evidenceFile = path.join(evidenceRoot, "channel", ".media", "status.jpg");
   const outsideDirectory = path.join(temporary, "outside-channel");
   const linkedEvidenceFile = path.join(evidenceRoot, "linked-channel", ".media", "leak.jpg");
-  await mkdir(path.join(taskRoot, "open"), { recursive: true });
-  await mkdir(path.join(taskRoot, "closed"));
+  await mkdir(path.join(taskRoot, "ship-fix", "tickets"), { recursive: true });
+  await mkdir(path.join(taskRoot, "old-task"));
+  await writeFile(path.join(taskRoot, "OPEN.md"), "# Open tasks\n\n- [ship-fix](ship-fix/README.md)\n");
   await mkdir(projectsRoot);
   await mkdir(path.dirname(evidenceFile), { recursive: true });
   await writeFile(evidenceFile, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
   await mkdir(path.join(outsideDirectory, ".media"), { recursive: true });
   await writeFile(path.join(outsideDirectory, ".media", "leak.jpg"), Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
   await symlink(outsideDirectory, path.join(evidenceRoot, "linked-channel"), "dir");
-  const taskFile = path.join(taskRoot, "open", "ship-fix.md");
+  const taskFile = path.join(taskRoot, "ship-fix", "README.md");
   await writeFile(taskFile, `---\nstatus: todo\n---\n\n# ship-fix\n\n## Outcome\n\nObservable result.\n\n## Evidence\n\n![Status screenshot](${evidenceFile})\n\n![Symlink escape](${linkedEvidenceFile})\n`);
-  await writeFile(path.join(taskRoot, "closed", "old-task.md"), "---\nstatus: done\n---\n\n# Old task\n\n## Outcome\n\nAlready finished.\n");
+  await writeFile(path.join(taskRoot, "ship-fix", "tickets", "01-update-behavior.md"), "# Update behavior\n");
+  await writeFile(path.join(taskRoot, "old-task", "README.md"), "---\nstatus: done\n---\n\n# Old task\n\n## Outcome\n\nAlready finished.\n");
   await symlink(taskRoot, path.join(projectsRoot, "alpha-project"), "dir");
   await mkdir(path.join(projectsRoot, "copied-project"));
   const incompleteRoot = path.join(temporary, "incomplete-store");
-  await mkdir(path.join(incompleteRoot, "open"), { recursive: true });
+  await mkdir(incompleteRoot, { recursive: true });
   await symlink(incompleteRoot, path.join(projectsRoot, "incomplete-project"), "dir");
 
   const server = await startDashboardHubServer(projectsRoot, { port: 0, evidenceRoot });
@@ -51,13 +53,19 @@ test("follows project symlinks, serves raw Markdown and referenced image evidenc
   assert.equal(await head.text(), "");
 
   const listing = await fetch(`${baseUrl}/alpha-project/task-files`);
-  assert.deepEqual(await listing.json(), ["/alpha-project/tasks/open/ship-fix.md"]);
+  assert.deepEqual(await listing.json(), [{
+    collection: "open",
+    filename: "README.md",
+    href: "/alpha-project/tasks/ship-fix",
+    id: "ship-fix",
+    stable: true,
+  }]);
 
-  const first = await fetch(`${baseUrl}/alpha-project/tasks/open/ship-fix.md`);
+  const first = await fetch(`${baseUrl}/alpha-project/tasks/ship-fix`);
   assert.equal(first.status, 200);
   assert.match(await first.text(), /# ship-fix/u);
 
-  const evidenceUrl = new URL(`${baseUrl}/alpha-project/evidence/open/ship-fix.md`);
+  const evidenceUrl = new URL(`${baseUrl}/alpha-project/evidence/ship-fix`);
   evidenceUrl.searchParams.set("path", evidenceFile);
   const evidence = await fetch(evidenceUrl);
   assert.equal(evidence.status, 200);
@@ -77,13 +85,41 @@ test("follows project symlinks, serves raw Markdown and referenced image evidenc
   const symlinkEscapeUrl = new URL(evidenceUrl);
   symlinkEscapeUrl.searchParams.set("path", linkedEvidenceFile);
   assert.equal((await fetch(symlinkEscapeUrl)).status, 404);
-  assert.equal((await fetch(`${baseUrl}/alpha-project/tasks/closed/old-task.md`)).status, 200);
+  assert.equal((await fetch(`${baseUrl}/alpha-project/tasks/old-task`)).status, 200);
+  assert.equal((await fetch(`${baseUrl}/alpha-project/tasks/ship-fix/tickets/01-update-behavior.md`)).status, 200);
 
   await writeFile(taskFile, "---\nstatus: todo\n---\n\n# Updated title\n\n## Outcome\n\nFresh from Markdown.\n");
-  const second = await fetch(`${baseUrl}/alpha-project/tasks/open/ship-fix.md`);
+  const second = await fetch(`${baseUrl}/alpha-project/tasks/ship-fix`);
   assert.match(await second.text(), /# Updated title/u);
 
-  const writeAttempt = await fetch(`${baseUrl}/alpha-project/tasks/open/ship-fix.md`, { method: "POST" });
+  const writeAttempt = await fetch(`${baseUrl}/alpha-project/tasks/ship-fix`, { method: "POST" });
   assert.equal(writeAttempt.status, 405);
   assert.equal(writeAttempt.headers.get("allow"), "GET, HEAD");
+});
+
+test("continues to serve legacy open and closed task stores", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "manage-tasks-legacy-hub-test-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const taskRoot = path.join(temporary, "task-store");
+  const projectsRoot = path.join(temporary, "projects");
+  await mkdir(path.join(taskRoot, "open"), { recursive: true });
+  await mkdir(path.join(taskRoot, "closed"));
+  await mkdir(projectsRoot);
+  await writeFile(path.join(taskRoot, "open", "open-task.md"), "---\nstatus: todo\n---\n\n# Open task\n\n## Outcome\n\nOpen.\n");
+  await writeFile(path.join(taskRoot, "closed", "done-task.md"), "---\nstatus: done\n---\n\n# Done task\n\n## Outcome\n\nDone.\n");
+  await symlink(taskRoot, path.join(projectsRoot, "legacy-project"), "dir");
+
+  const server = await startDashboardHubServer(projectsRoot, { port: 0 });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  assert.deepEqual(await (await fetch(`${baseUrl}/legacy-project/task-files`)).json(), [{
+    collection: "open",
+    filename: "open-task.md",
+    href: "/legacy-project/tasks/open/open-task.md",
+    id: "open-task",
+    stable: false,
+  }]);
+  assert.equal((await fetch(`${baseUrl}/legacy-project/tasks/closed/done-task.md`)).status, 200);
 });

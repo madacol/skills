@@ -9,27 +9,81 @@ async function fixture(t) {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "manage-tasks-test-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
   const root = path.join(temporary, "tasks");
-  await mkdir(path.join(root, "open"), { recursive: true });
-  await mkdir(path.join(root, "closed"), { recursive: true });
+  await mkdir(root);
+  await writeFile(path.join(root, "OPEN.md"), "# Open tasks\n");
   return root;
 }
 
-async function record(root, collection, id, frontmatter = "status: todo", extra = "") {
-  const file = path.join(root, collection, `${id}.md`);
-  await writeFile(file, `---\n${frontmatter}\n---\n\n# ${id}\n\n## Outcome\n\nObservable result.\n${extra}`);
+async function writeOpen(root, entries) {
+  const lines = entries.map(({ id, title = id }) => `- [${title}](${id}/README.md)`);
+  await writeFile(path.join(root, "OPEN.md"), `# Open tasks\n\n${lines.join("\n")}\n`);
+}
+
+async function record(root, id, frontmatter = "status: todo", extra = "", title = id) {
+  const directory = path.join(root, id);
+  await mkdir(directory, { recursive: true });
+  const file = path.join(directory, "README.md");
+  await writeFile(file, `---\n${frontmatter}\n---\n\n# ${title}\n\n## Outcome\n\nObservable result.\n${extra}`);
   return file;
 }
 
-test("validates open and closed task records", async (t) => {
+test("validates stable task directories against the manually maintained open index", async (t) => {
   const root = await fixture(t);
-  await record(root, "open", "ship-fix");
-  await record(root, "closed", "shipped-fix", "status: done", "\n## Completion\n\nTests passed.\n");
+  await record(root, "ship-fix", "status: todo", "", "Ship fix");
+  await record(root, "shipped-fix", "status: done", "\n## Completion\n\nTests passed.\n", "Shipped fix");
+  await mkdir(path.join(root, "ship-fix", "tickets"));
+  await writeFile(path.join(root, "ship-fix", "tickets", "01-update-behavior.md"), "# Update behavior\n");
+  await writeOpen(root, [{ id: "ship-fix", title: "Ship fix" }]);
   assert.deepEqual(await validateTaskStore(root), { open: 1, closed: 1 });
 });
 
-test("validates a structured decision and preserves yes and no as string option IDs", async (t) => {
+test("rejects malformed, duplicate, and missing open-task links", async (t) => {
   const root = await fixture(t);
-  await record(root, "open", "choose-path", `status: awaiting_decision
+  await record(root, "ship-fix", "status: todo", "", "Ship fix");
+
+  await writeFile(path.join(root, "OPEN.md"), "# Open tasks\n\n- ship-fix\n");
+  await assert.rejects(validateTaskStore(root), /expected - \[Task title\]/u);
+
+  await writeFile(path.join(root, "OPEN.md"), "# Open tasks\n\n- [Ship fix](ship-fix/README.md)\n- [Ship fix](ship-fix/README.md)\n");
+  await assert.rejects(validateTaskStore(root), /duplicate open task/u);
+
+  await writeOpen(root, [{ id: "missing-task", title: "Missing task" }]);
+  await assert.rejects(validateTaskStore(root), /has no task directory/u);
+
+  await writeOpen(root, [{ id: "ship-fix", title: "Old title" }]);
+  await validateTaskStore(root);
+});
+
+test("requires OPEN.md membership to agree with terminal state", async (t) => {
+  const root = await fixture(t);
+  await record(root, "ship-fix", "status: todo", "", "Ship fix");
+  await assert.rejects(validateTaskStore(root), /must appear in OPEN\.md/u);
+  await record(root, "ship-fix", "status: done", "\n## Completion\n\nDone.\n", "Ship fix");
+  await writeOpen(root, [{ id: "ship-fix", title: "Ship fix" }]);
+  await assert.rejects(validateTaskStore(root), /must not appear in OPEN\.md/u);
+});
+
+test("validates ticket filenames and unique numeric positions", async (t) => {
+  const root = await fixture(t);
+  await record(root, "planned-work", "status: todo", "", "Planned work");
+  await writeOpen(root, [{ id: "planned-work", title: "Planned work" }]);
+  const tickets = path.join(root, "planned-work", "tickets");
+  await mkdir(tickets);
+  await writeFile(path.join(tickets, "first.md"), "# First\n");
+  await assert.rejects(validateTaskStore(root), /NN-lowercase-slug/u);
+  await rm(path.join(tickets, "first.md"));
+  await writeFile(path.join(tickets, "01-first.md"), "# First\n");
+  await writeFile(path.join(tickets, "01-again.md"), "# Again\n");
+  await assert.rejects(validateTaskStore(root), /duplicate ticket position/u);
+  await rm(path.join(tickets, "01-first.md"));
+  await rm(path.join(tickets, "01-again.md"));
+  await writeFile(path.join(tickets, "02-second.md"), "# Second\n");
+  await assert.rejects(validateTaskStore(root), /start at 01 and remain contiguous/u);
+});
+
+test("validates structured decisions and conditional execution fields", async (t) => {
+  const root = await fixture(t);
+  await record(root, "choose-path", `status: awaiting_decision
 decision:
   question: Which path should we take?
   options:
@@ -39,81 +93,53 @@ decision:
     no:
       label: Stop
       description: Cancel the task.
-  recommendation: yes`);
+  recommendation: yes`, "", "Choose path");
+  await writeOpen(root, [{ id: "choose-path", title: "Choose path" }]);
   await validateTaskStore(root);
-});
 
-test("rejects duplicate frontmatter keys", async (t) => {
-  const root = await fixture(t);
-  await record(root, "open", "ship-fix", "status: todo\nstatus: waiting");
-  await assert.rejects(validateTaskStore(root), /duplicate frontmatter key/);
-});
-
-test("requires waiting_for only while waiting", async (t) => {
-  const root = await fixture(t);
-  await record(root, "open", "hardware-test", "status: waiting\nwaiting_for: Replacement hardware arrives");
-  await validateTaskStore(root);
-  await record(root, "open", "hardware-test", "status: in_progress\nwaiting_for: Replacement hardware arrives");
-  await assert.rejects(validateTaskStore(root), /waiting_for is allowed only for waiting/);
+  await record(root, "choose-path", "status: in_progress\nwaiting_for: Review arrives", "", "Choose path");
+  await assert.rejects(validateTaskStore(root), /waiting_for is allowed only for waiting/u);
 });
 
 test("validates composite Session and agent ownership only for active work", async (t) => {
   const root = await fixture(t);
-  await record(root, "open", "active-task", "status: in_progress\nowner: 8e25a58d/root/status_tests/reviewer");
+  await record(root, "active-task", "status: in_progress\nowner: 8e25a58d/root/status_tests/reviewer", "", "Active task");
+  await writeOpen(root, [{ id: "active-task", title: "Active task" }]);
   await validateTaskStore(root);
-
-  await record(root, "open", "active-task", "status: in_progress\nowner: 01a05731");
-  await validateTaskStore(root);
-
-  await record(root, "open", "active-task", "status: in_progress\nowner: 8E25A58D/root");
-  await assert.rejects(validateTaskStore(root), /Session fingerprint/);
-
-  await record(root, "open", "active-task", "status: in_progress\nowner: 8e25a58d/reviewer");
-  await assert.rejects(validateTaskStore(root), /canonical agent path/);
-
-  await record(root, "open", "active-task", "status: todo\nowner: 8e25a58d/root");
-  await assert.rejects(validateTaskStore(root), /owner is allowed only for in_progress/);
-});
-
-test("allows one agent to own multiple active tasks", async (t) => {
-  const root = await fixture(t);
-  await record(root, "open", "first-active", "status: in_progress\nowner: 8e25a58d/root");
-  await record(root, "open", "second-active", "status: in_progress\nowner: 8e25a58d/root");
-  await validateTaskStore(root);
+  await record(root, "active-task", "status: todo\nowner: 8e25a58d/root", "", "Active task");
+  await assert.rejects(validateTaskStore(root), /owner is allowed only for in_progress/u);
 });
 
 test("rejects missing dependencies and dependency cycles", async (t) => {
   const root = await fixture(t);
-  await record(root, "open", "first-task", "status: todo\nblocked_by:\n  - second-task");
-  await assert.rejects(validateTaskStore(root), /missing task/);
-  await record(root, "open", "second-task", "status: todo\nblocked_by:\n  - first-task");
-  await assert.rejects(validateTaskStore(root), /dependency cycle/);
+  await record(root, "first-task", "status: todo\nblocked_by:\n  - second-task", "", "First task");
+  await writeOpen(root, [{ id: "first-task", title: "First task" }]);
+  await assert.rejects(validateTaskStore(root), /missing task/u);
+  await record(root, "second-task", "status: todo\nblocked_by:\n  - first-task", "", "Second task");
+  await writeOpen(root, [{ id: "first-task", title: "First task" }, { id: "second-task", title: "Second task" }]);
+  await assert.rejects(validateTaskStore(root), /dependency cycle/u);
 });
 
-test("rejects nested records and status-folder mismatches", async (t) => {
+test("requires outcome and terminal evidence", async (t) => {
   const root = await fixture(t);
-  await mkdir(path.join(root, "open", "nested"));
-  await assert.rejects(validateTaskStore(root), /must be flat/);
-  await rm(path.join(root, "open", "nested"), { recursive: true });
-  await record(root, "open", "finished-task", "status: done", "\n## Completion\n\nDone.\n");
-  await assert.rejects(validateTaskStore(root), /belongs under closed/);
-});
-
-test("requires outcome and completion or cancellation evidence", async (t) => {
-  const root = await fixture(t);
-  const file = await record(root, "closed", "finished-task", "status: done");
-  await assert.rejects(validateTaskStore(root), /Completion/);
+  const file = await record(root, "finished-task", "status: done");
+  await assert.rejects(validateTaskStore(root), /Completion/u);
   await writeFile(file, "---\nstatus: canceled\n---\n\n# finished-task\n");
   await assert.rejects(validateTaskStore(root), (error) => {
     assert(error instanceof TaskValidationError);
-    assert.match(error.message, /Outcome/);
-    assert.match(error.message, /Cancellation/);
+    assert.match(error.message, /Outcome/u);
+    assert.match(error.message, /Cancellation/u);
     return true;
   });
 });
 
-test("allows unrelated additional frontmatter fields", async (t) => {
-  const root = await fixture(t);
-  await record(root, "open", "ship-fix", "status: todo\npriority: high");
-  await validateTaskStore(root);
+test("continues to validate legacy open and closed stores", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "manage-tasks-legacy-test-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const root = path.join(temporary, "tasks");
+  await mkdir(path.join(root, "open"), { recursive: true });
+  await mkdir(path.join(root, "closed"));
+  await writeFile(path.join(root, "open", "open-task.md"), "---\nstatus: todo\n---\n\n# Open task\n\n## Outcome\n\nOpen.\n");
+  await writeFile(path.join(root, "closed", "done-task.md"), "---\nstatus: done\n---\n\n# Done task\n\n## Outcome\n\nDone.\n\n## Completion\n\nVerified.\n");
+  assert.deepEqual(await validateTaskStore(root), { open: 1, closed: 1 });
 });

@@ -52,3 +52,11 @@ test("rewrites local evidence images through the caller and finds their source p
   assert.match(html, /<img src="\/madabot\/evidence\/open\/task\.md\?path=authorized" alt="Status evidence" loading="lazy" decoding="async">/u);
   assert.deepEqual(extractMarkdownImageHrefs(markdown), [localPath]);
 });
+
+test("rewrites task-relative links through the caller", () => {
+  const html = renderMarkdown("[First ticket](tickets/01-first-ticket.md)", {
+    resolveLinkHref: (href) => href === "tickets/01-first-ticket.md" ? "/skills/tasks/task-id/tickets/01-first-ticket.md" : null,
+  });
+
+  assert.match(html, /<a href="\/skills\/tasks\/task-id\/tickets\/01-first-ticket\.md">First ticket<\/a>/u);
+});

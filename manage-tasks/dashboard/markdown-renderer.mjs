@@ -33,7 +33,7 @@ function safeUrl(value, protocols) {
   }
 }
 
-/** @typedef {{ resolveImageHref?: (href: string) => string | null }} MarkdownRenderOptions */
+/** @typedef {{ resolveImageHref?: (href: string) => string | null, resolveLinkHref?: (href: string) => string | null }} MarkdownRenderOptions */
 
 /** @param {MarkdownRenderOptions} options */
 function safeRenderer(options) {
@@ -41,7 +41,8 @@ function safeRenderer(options) {
   renderer.html = ({ text }) => escapeHtml(text);
   renderer.link = function link({ href, title, tokens }) {
     const content = this.parser.parseInline(tokens);
-    const safeHref = safeUrl(href, LINK_PROTOCOLS);
+    const resolvedHref = options.resolveLinkHref ? options.resolveLinkHref(href) : href;
+    const safeHref = resolvedHref === null ? null : safeUrl(resolvedHref, LINK_PROTOCOLS);
     if (safeHref === null) return content;
     const titleAttribute = title ? ` title="${escapeAttribute(title)}"` : "";
     return `<a href="${escapeAttribute(safeHref)}"${titleAttribute}>${content}</a>`;

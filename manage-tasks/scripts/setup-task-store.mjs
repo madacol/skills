@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { lstat, mkdir, readlink, stat, symlink } from "node:fs/promises";
+import { lstat, mkdir, readlink, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -12,6 +12,26 @@ async function ensureDirectory(directory) {
   const createdPath = await mkdir(directory, { recursive: true });
   if (!(await stat(directory)).isDirectory()) throw new Error(`Expected directory ${directory}`);
   return createdPath !== undefined;
+}
+
+async function isDirectory(directory) {
+  try {
+    return (await stat(directory)).isDirectory();
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function ensureOpenIndex(taskRoot) {
+  const indexPath = path.join(taskRoot, "OPEN.md");
+  try {
+    await writeFile(indexPath, "# Open tasks\n", { flag: "wx" });
+    return indexPath;
+  } catch (error) {
+    if (error?.code === "EEXIST") return null;
+    throw error;
+  }
 }
 
 async function existingLinkTarget(linkPath) {
@@ -30,9 +50,12 @@ export async function setupTaskStore(workspaceRoot, projectId, options = {}) {
   const workspace = path.resolve(workspaceRoot);
   const taskRoot = path.join(workspace, "tasks");
   const createdDirectories = [];
-  for (const collection of ["open", "closed"]) {
-    const directory = path.join(taskRoot, collection);
-    if (await ensureDirectory(directory)) createdDirectories.push(directory);
+  if (await ensureDirectory(taskRoot)) createdDirectories.push(taskRoot);
+  const legacyStore = await isDirectory(path.join(taskRoot, "open")) && await isDirectory(path.join(taskRoot, "closed"));
+  const createdFiles = [];
+  if (!legacyStore) {
+    const indexPath = await ensureOpenIndex(taskRoot);
+    if (indexPath) createdFiles.push(indexPath);
   }
   const projectsRoot = path.resolve(options.projectsRoot ?? DEFAULT_PROJECTS_ROOT);
   await mkdir(projectsRoot, { recursive: true });
@@ -40,15 +63,15 @@ export async function setupTaskStore(workspaceRoot, projectId, options = {}) {
   const currentTarget = await existingLinkTarget(linkPath);
   if (currentTarget !== null) {
     if (currentTarget !== taskRoot) throw new Error(`${projectId} already points to ${currentTarget}`);
-    return { createdDirectories, registrationCreated: false, linkPath, taskRoot };
+    return { createdDirectories, createdFiles, registrationCreated: false, linkPath, taskRoot };
   }
   try {
     await symlink(path.relative(projectsRoot, taskRoot), linkPath, "dir");
-    return { createdDirectories, registrationCreated: true, linkPath, taskRoot };
+    return { createdDirectories, createdFiles, registrationCreated: true, linkPath, taskRoot };
   } catch (error) {
     if (error?.code !== "EEXIST") throw error;
     const racedTarget = await existingLinkTarget(linkPath);
-    if (racedTarget === taskRoot) return { createdDirectories, registrationCreated: false, linkPath, taskRoot };
+    if (racedTarget === taskRoot) return { createdDirectories, createdFiles, registrationCreated: false, linkPath, taskRoot };
     throw new Error(`${projectId} already points to ${racedTarget}`);
   }
 }

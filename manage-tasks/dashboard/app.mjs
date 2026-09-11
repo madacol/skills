@@ -91,9 +91,7 @@ function contextLine(label, value) {
 
 function render() {
   elements.grid.replaceChildren();
-  const visible = state.tasks.filter(matches).sort((left, right) => {
-    return (TASK_STATUS_INFO[left.status]?.order ?? 99) - (TASK_STATUS_INFO[right.status]?.order ?? 99) || left.title.localeCompare(right.title);
-  });
+  const visible = state.tasks.filter(matches);
   elements.grid.append(...visible.map(taskCard));
   elements.empty.hidden = visible.length !== 0;
 }
@@ -121,9 +119,20 @@ function metadataRows(task) {
  */
 function taskImageHref(task, href) {
   if (!href.startsWith("/home/mada/chat/")) return href;
-  const endpoint = new URL(`/${encodeURIComponent(projectId)}/evidence/${encodeURIComponent(task.collection)}/${encodeURIComponent(task.filename)}`, location.origin);
+  const evidencePath = task.stable
+    ? `/${encodeURIComponent(projectId)}/evidence/${encodeURIComponent(task.id)}`
+    : `/${encodeURIComponent(projectId)}/evidence/${encodeURIComponent(task.collection)}/${encodeURIComponent(task.filename)}`;
+  const endpoint = new URL(evidencePath, location.origin);
   endpoint.searchParams.set("path", href);
   return `${endpoint.pathname}${endpoint.search}`;
+}
+
+function taskLinkHref(task, href) {
+  if (!task.stable || !href.startsWith("tickets/")) return href;
+  const [filename, fragment] = href.slice("tickets/".length).split("#", 2);
+  if (!/^[0-9]{2,}-[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(filename)) return null;
+  const ticketPath = `/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(task.id)}/tickets/${encodeURIComponent(filename)}`;
+  return fragment ? `${ticketPath}#${encodeURIComponent(fragment)}` : ticketPath;
 }
 
 function showTask(task) {
@@ -143,7 +152,10 @@ function showTask(task) {
     section.append(textElement("h3", "", name.replaceAll("_", " ")));
     const markdown = document.createElement("div");
     markdown.className = "markdown";
-    markdown.innerHTML = renderMarkdown(content, { resolveImageHref: (href) => taskImageHref(task, href) });
+    markdown.innerHTML = renderMarkdown(content, {
+      resolveImageHref: (href) => taskImageHref(task, href),
+      resolveLinkHref: (href) => taskLinkHref(task, href),
+    });
     section.append(markdown);
     elements.dialogBody.append(section);
   }
@@ -173,16 +185,13 @@ async function loadTasks() {
   try {
     const response = await fetch(`task-files?t=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) throw new Error(`Could not list task files. Request failed with ${response.status}.`);
-    const files = await response.json();
-    const results = await mapWithConcurrency(files, 12, async (file) => {
-      const rawResponse = await fetch(`${file}?t=${Date.now()}`, { cache: "no-store" });
-      if (!rawResponse.ok) throw new Error(`${file}: request failed with ${rawResponse.status}`);
-      const parsed = parseTaskMarkdown(await rawResponse.text(), file);
-      const parts = file.split("/");
+    const descriptors = await response.json();
+    const results = await mapWithConcurrency(descriptors, 12, async (descriptor) => {
+      const rawResponse = await fetch(`${descriptor.href}?t=${Date.now()}`, { cache: "no-store" });
+      if (!rawResponse.ok) throw new Error(`${descriptor.href}: request failed with ${rawResponse.status}`);
+      const parsed = parseTaskMarkdown(await rawResponse.text(), descriptor.href);
       return {
-        id: decodeURIComponent(parts.at(-1)).replace(/\.md$/u, ""),
-        filename: decodeURIComponent(parts.at(-1)),
-        collection: parts.at(-2),
+        ...descriptor,
         status: parsed.metadata.status,
         metadata: parsed.metadata,
         title: parsed.title,

@@ -5,6 +5,7 @@ import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { extractMarkdownImageHrefs } from "./markdown-renderer.mjs";
+import { parseOpenTaskIndex } from "./open-task-index.mjs";
 
 const DASHBOARD_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PROJECTS_ROOT = path.resolve(DASHBOARD_ROOT, "../projects");
@@ -46,6 +47,15 @@ async function isDirectory(target) {
   }
 }
 
+async function isFile(target) {
+  try {
+    return (await stat(target)).isFile();
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 async function registeredProjects(projectsRoot) {
   if (!(await isDirectory(projectsRoot))) throw new Error(`Expected projects directory ${projectsRoot}`);
   const registered = new Map();
@@ -54,24 +64,43 @@ async function registeredProjects(projectsRoot) {
     if (!PROJECT_ID.test(project.name) || !project.isSymbolicLink()) continue;
     const taskRoot = path.join(projectsRoot, project.name);
     if (!(await isDirectory(taskRoot))) continue;
-    const collections = ["open", "closed"];
-    const directories = collections.map((collection) => path.join(taskRoot, collection));
-    if (!(await Promise.all(directories.map(isDirectory))).every(Boolean)) continue;
-    registered.set(project.name, { taskRoot, directories });
+    const openIndex = path.join(taskRoot, "OPEN.md");
+    if (await isFile(openIndex)) {
+      registered.set(project.name, { layout: "stable", openIndex, taskRoot });
+      continue;
+    }
+    const directories = [path.join(taskRoot, "open"), path.join(taskRoot, "closed")];
+    if ((await Promise.all(directories.map(isDirectory))).every(Boolean)) {
+      registered.set(project.name, { layout: "legacy", directories, taskRoot });
+    }
   }
   return registered;
 }
 
 async function projectTaskFiles(projectId, project) {
-  const files = new Map();
+  if (project.layout === "stable") {
+    return parseOpenTaskIndex(await readFile(project.openIndex, "utf8"), project.openIndex).map((entry) => ({
+      collection: "open",
+      filename: "README.md",
+      href: `/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(entry.id)}`,
+      id: entry.id,
+      stable: true,
+    }));
+  }
+  const files = [];
   const directory = project.directories[0];
   const entries = await readdir(directory, { withFileTypes: true });
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
-    const url = `/${encodeURIComponent(projectId)}/tasks/open/${encodeURIComponent(entry.name)}`;
-    files.set(url, path.join(directory, entry.name));
+    files.push({
+      collection: "open",
+      filename: entry.name,
+      href: `/${encodeURIComponent(projectId)}/tasks/open/${encodeURIComponent(entry.name)}`,
+      id: entry.name.slice(0, -3),
+      stable: false,
+    });
   }
-  return files;
+  return files.sort((left, right) => left.id.localeCompare(right.id));
 }
 
 function projectIndex(projectIds) {
@@ -140,12 +169,56 @@ export function createDashboardHubServer(projectsRoot = DEFAULT_PROJECTS_ROOT, o
       }
       if (parts.length === 2 && parts[1] === "task-files") {
         const files = await projectTaskFiles(projectId, projects.get(projectId));
-        send(response, 200, "application/json; charset=utf-8", JSON.stringify([...files.keys()].sort()));
+        send(response, 200, "application/json; charset=utf-8", JSON.stringify(files));
         return;
+      }
+      if (parts.length === 3 && parts[1] === "evidence") {
+        const taskId = parts[2];
+        const project = projects.get(projectId);
+        if (project.layout === "stable" && PROJECT_ID.test(taskId)) {
+          const taskPath = path.join(project.taskRoot, taskId, "README.md");
+          if (await isFile(taskPath)) {
+            const evidence = await referencedEvidence(taskPath, requestUrl.searchParams.get("path"), evidenceRoot);
+            if (evidence) {
+              send(response, 200, evidence.contentType, await readFile(evidence.path), {
+                "content-disposition": "inline",
+                "cross-origin-resource-policy": "same-origin",
+              });
+              return;
+            }
+          }
+        }
+      }
+      if (parts.length === 3 && parts[1] === "tasks") {
+        const taskId = parts[2];
+        const project = projects.get(projectId);
+        if (project.layout === "stable" && PROJECT_ID.test(taskId)) {
+          const taskPath = path.join(project.taskRoot, taskId, "README.md");
+          if (await isFile(taskPath)) {
+            send(response, 200, "text/markdown; charset=utf-8", await readFile(taskPath));
+            return;
+          }
+        }
+      }
+      if (parts.length === 5 && parts[1] === "tasks" && parts[3] === "tickets") {
+        const taskId = parts[2];
+        const filename = parts[4];
+        const project = projects.get(projectId);
+        if (project.layout === "stable" && PROJECT_ID.test(taskId) && filename.endsWith(".md") && path.basename(filename) === filename) {
+          const ticketPath = path.join(project.taskRoot, taskId, "tickets", filename);
+          if (await isFile(ticketPath)) {
+            send(response, 200, "text/markdown; charset=utf-8", await readFile(ticketPath));
+            return;
+          }
+        }
       }
       if (parts.length === 4 && parts[1] === "evidence" && ["open", "closed"].includes(parts[2])) {
         const filename = parts[3];
         const project = projects.get(projectId);
+        if (project.layout !== "legacy") {
+          send(response, 404, "text/plain; charset=utf-8", "Not found\n");
+          return;
+        }
         const directory = project.directories[parts[2] === "open" ? 0 : 1];
         const taskPath = path.join(directory, filename);
         if (filename.endsWith(".md") && path.basename(filename) === filename && (await lstat(taskPath)).isFile()) {
@@ -162,6 +235,10 @@ export function createDashboardHubServer(projectsRoot = DEFAULT_PROJECTS_ROOT, o
       if (parts.length === 4 && parts[1] === "tasks" && ["open", "closed"].includes(parts[2])) {
         const filename = parts[3];
         const project = projects.get(projectId);
+        if (project.layout !== "legacy") {
+          send(response, 404, "text/plain; charset=utf-8", "Not found\n");
+          return;
+        }
         const directory = project.directories[parts[2] === "open" ? 0 : 1];
         const taskPath = path.join(directory, filename);
         if (filename.endsWith(".md") && path.basename(filename) === filename && (await lstat(taskPath)).isFile()) {

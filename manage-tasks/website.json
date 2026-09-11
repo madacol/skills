@@ -4,6 +4,9 @@
     "mode": "tailnet"
   },
   "service": {
+    "environment": {
+      "TASK_DASHBOARD_BUILD": "open-index-v1"
+    },
     "command": [
       "/usr/bin/node",
       "dashboard/server.mjs"

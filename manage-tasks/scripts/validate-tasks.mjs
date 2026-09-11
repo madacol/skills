@@ -3,6 +3,7 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { parseOpenTaskIndex } from "../dashboard/open-task-index.mjs";
 import { parseTaskMarkdown } from "../dashboard/task-parser.mjs";
 import { TASK_STATUS_INFO } from "../dashboard/task-statuses.mjs";
 
@@ -10,6 +11,7 @@ const OPEN_STATUSES = new Set(Object.entries(TASK_STATUS_INFO).filter(([, info])
 const CLOSED_STATUSES = new Set(Object.entries(TASK_STATUS_INFO).filter(([, info]) => info.collection === "closed").map(([status]) => status));
 const ALL_STATUSES = new Set(Object.keys(TASK_STATUS_INFO));
 const TASK_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+const TICKET_FILE_PATTERN = /^([0-9]{2,})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u;
 const OWNER_PATTERN = /^[0-9a-f]{8}(?:\/root(?:\/[a-z0-9_]+)*)?$/u;
 
 export class TaskValidationError extends Error {}
@@ -55,10 +57,10 @@ function validateDecision(record, errors) {
 
 function validateRecord(record) {
   const errors = [];
-  if (!TASK_ID_PATTERN.test(record.id)) errors.push(`${record.path}: filename must be a lowercase kebab-case task ID`);
+  if (!TASK_ID_PATTERN.test(record.id)) errors.push(`${record.path}: task ID must be lowercase kebab-case`);
   if (!ALL_STATUSES.has(record.status)) errors.push(`${record.path}: unknown status ${JSON.stringify(record.status)}`);
-  else if (record.collection === "open" && !OPEN_STATUSES.has(record.status)) errors.push(`${record.path}: status ${JSON.stringify(record.status)} belongs under closed/`);
-  else if (record.collection === "closed" && !CLOSED_STATUSES.has(record.status)) errors.push(`${record.path}: status ${JSON.stringify(record.status)} belongs under open/`);
+  else if (record.isOpen && !OPEN_STATUSES.has(record.status)) errors.push(`${record.path}: terminal status ${JSON.stringify(record.status)} must not appear in OPEN.md`);
+  else if (!record.isOpen && !CLOSED_STATUSES.has(record.status)) errors.push(`${record.path}: non-terminal status ${JSON.stringify(record.status)} must appear in OPEN.md`);
 
   const sections = record.sections;
   if (!sections.outcome) errors.push(`${record.path}: Markdown body requires a non-empty ## Outcome section`);
@@ -68,9 +70,7 @@ function validateRecord(record) {
   validateDecision(record, errors);
   const owner = record.metadata.owner;
   if (owner != null) {
-    if (record.status !== "in_progress") {
-      errors.push(`${record.path}: owner is allowed only for in_progress`);
-    }
+    if (record.status !== "in_progress") errors.push(`${record.path}: owner is allowed only for in_progress`);
     if (typeof owner !== "string" || !OWNER_PATTERN.test(owner)) {
       errors.push(`${record.path}: owner must be an eight-character lowercase hexadecimal Session fingerprint, with new owners followed by a canonical agent path such as /root or /root/tests`);
     }
@@ -102,47 +102,119 @@ function validateRecord(record) {
   return errors;
 }
 
-async function isDirectory(target) {
+async function kind(target) {
   try {
-    return (await stat(target)).isDirectory();
+    const metadata = await stat(target);
+    if (metadata.isDirectory()) return "directory";
+    if (metadata.isFile()) return "file";
+    return "other";
   } catch (error) {
-    if (error?.code === "ENOENT") return false;
+    if (error?.code === "ENOENT") return null;
     throw error;
   }
 }
 
-async function loadRecords(root) {
+async function parseRecord(recordPath, id, isOpen) {
+  let parsed;
+  try {
+    parsed = parseTaskMarkdown(await readFile(recordPath, "utf8"), recordPath);
+  } catch (error) {
+    throw new TaskValidationError(error instanceof Error ? error.message : String(error));
+  }
+  if (typeof parsed.metadata.status !== "string") fail(recordPath, "frontmatter status must be a string");
+  return { id, status: parsed.metadata.status, path: recordPath, isOpen, metadata: parsed.metadata, body: parsed.body, title: parsed.title, sections: parsed.sections };
+}
+
+async function validateTicketDirectory(taskDirectory, errors) {
+  const ticketDirectory = path.join(taskDirectory, "tickets");
+  const ticketKind = await kind(ticketDirectory);
+  if (ticketKind === null) return;
+  if (ticketKind !== "directory") {
+    errors.push(`${ticketDirectory}: tickets must be a directory`);
+    return;
+  }
+  const positions = new Set();
+  for (const entry of await readdir(ticketDirectory, { withFileTypes: true })) {
+    if (!entry.isFile()) {
+      errors.push(`${ticketDirectory}: tickets must be Markdown files; found ${entry.name}`);
+      continue;
+    }
+    const match = TICKET_FILE_PATTERN.exec(entry.name);
+    if (!match) {
+      errors.push(`${ticketDirectory}: ticket filename must be NN-lowercase-slug.md; found ${entry.name}`);
+      continue;
+    }
+    const position = Number(match[1]);
+    if (position < 1) errors.push(`${ticketDirectory}: ticket numbering starts at 01`);
+    if (positions.has(position)) errors.push(`${ticketDirectory}: duplicate ticket position ${match[1]}`);
+    positions.add(position);
+  }
+  const ordered = [...positions].sort((left, right) => left - right);
+  const firstGap = ordered.findIndex((position, index) => position !== index + 1);
+  if (firstGap >= 0) errors.push(`${ticketDirectory}: ticket positions must start at 01 and remain contiguous`);
+}
+
+async function loadStableRecords(root) {
+  const indexPath = path.join(root, "OPEN.md");
+  let openEntries;
+  try {
+    openEntries = parseOpenTaskIndex(await readFile(indexPath, "utf8"), indexPath);
+  } catch (error) {
+    throw new TaskValidationError(error instanceof Error ? error.message : String(error));
+  }
+  const openById = new Map(openEntries.map((entry) => [entry.id, entry]));
+  const records = [];
+  const errors = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (entry.name === "OPEN.md") continue;
+    if (!entry.isDirectory()) {
+      errors.push(`${root}: expected only OPEN.md and task directories; found ${entry.name}`);
+      continue;
+    }
+    if (!TASK_ID_PATTERN.test(entry.name)) {
+      errors.push(`${root}: task directory must be lowercase kebab-case; found ${entry.name}/`);
+      continue;
+    }
+    const taskDirectory = path.join(root, entry.name);
+    const contents = await readdir(taskDirectory, { withFileTypes: true });
+    for (const child of contents) {
+      if (child.name === "README.md" && child.isFile()) continue;
+      if (child.name === "tickets" && child.isDirectory()) continue;
+      errors.push(`${taskDirectory}: expected only README.md and tickets/; found ${child.name}${child.isDirectory() ? "/" : ""}`);
+    }
+    const recordPath = path.join(taskDirectory, "README.md");
+    if (await kind(recordPath) !== "file") {
+      errors.push(`${taskDirectory}: task directory requires README.md`);
+      continue;
+    }
+    const record = await parseRecord(recordPath, entry.name, openById.has(entry.name));
+    records.push(record);
+    await validateTicketDirectory(taskDirectory, errors);
+  }
+  const recordIds = new Set(records.map((record) => record.id));
+  for (const openEntry of openEntries) {
+    if (!recordIds.has(openEntry.id)) errors.push(`${indexPath}: open task ${JSON.stringify(openEntry.id)} has no task directory`);
+  }
+  if (errors.length) throw new TaskValidationError(errors.join("\n"));
+  return records;
+}
+
+async function loadLegacyRecords(root) {
   const records = [];
   for (const collection of ["open", "closed"]) {
     const directory = path.join(root, collection);
-    if (!(await isDirectory(directory))) fail(root, "expected open/ and closed/ directories");
-    const entries = await readdir(directory, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isDirectory()) fail(directory, `task records must be flat; found ${entry.name}/`);
+    if (await kind(directory) !== "directory") fail(root, "expected OPEN.md or legacy open/ and closed/ directories");
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) fail(directory, `legacy task records must be flat; found ${entry.name}/`);
       if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
-      const recordPath = path.join(directory, entry.name);
-      const raw = await readFile(recordPath, "utf8");
-      let parsed;
-      try {
-        parsed = parseTaskMarkdown(raw, recordPath);
-      } catch (error) {
-        throw new TaskValidationError(error instanceof Error ? error.message : String(error));
-      }
-      const { metadata, body, title, sections } = parsed;
-      if (typeof metadata.status !== "string") fail(recordPath, "frontmatter status must be a string");
-      records.push({
-        id: entry.name.slice(0, -3),
-        status: metadata.status,
-        path: recordPath,
-        collection,
-        metadata,
-        body,
-        title,
-        sections,
-      });
+      records.push(await parseRecord(path.join(directory, entry.name), entry.name.slice(0, -3), collection === "open"));
     }
   }
   return records;
+}
+
+async function loadRecords(root) {
+  return await kind(path.join(root, "OPEN.md")) === "file" ? loadStableRecords(root) : loadLegacyRecords(root);
 }
 
 function dependencyErrors(records) {
@@ -154,9 +226,7 @@ function dependencyErrors(records) {
   const errors = [];
   const graph = new Map();
   for (const record of records) {
-    const dependencies = Array.isArray(record.metadata.blocked_by)
-      ? record.metadata.blocked_by.filter((item) => typeof item === "string")
-      : [];
+    const dependencies = Array.isArray(record.metadata.blocked_by) ? record.metadata.blocked_by.filter((item) => typeof item === "string") : [];
     graph.set(record.id, dependencies);
     for (const dependency of dependencies) {
       if (!byId.has(dependency)) errors.push(`${record.path}: blocked_by references missing task ${JSON.stringify(dependency)}`);
@@ -182,15 +252,11 @@ function dependencyErrors(records) {
 }
 
 export async function validateTaskStore(root) {
-  const resolvedRoot = path.resolve(root);
-  const records = await loadRecords(resolvedRoot);
+  const records = await loadRecords(path.resolve(root));
   const errors = records.flatMap(validateRecord);
   errors.push(...dependencyErrors(records));
   if (errors.length) throw new TaskValidationError(errors.join("\n"));
-  return {
-    open: records.filter((record) => record.collection === "open").length,
-    closed: records.filter((record) => record.collection === "closed").length,
-  };
+  return { open: records.filter((record) => record.isOpen).length, closed: records.filter((record) => !record.isOpen).length };
 }
 
 const isMain = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;

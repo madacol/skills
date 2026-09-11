@@ -13,58 +13,97 @@ node <skill-directory>/scripts/setup-task-store.mjs <workspace-directory> <proje
 
 Dashboard: `https://task.babyjarvis.com/<project-slug>/`
 
-Use `tasks/open/<task-id>.md` while work may continue. Move the same file to `tasks/closed/` when it is done or canceled.
+## Store layout
 
-Use one source for each fact:
+Keep task paths stable. The task directory name is its ID, `README.md` is its managed record, and any implementation tickets live beneath it:
 
-- Filename is the task ID.
-- First H1 is the title.
-- Frontmatter stores current status, an active decision, an external wait, and task dependencies.
-- Frontmatter `owner` stores the active agent's short Session and agent identity.
-- Markdown sections store the outcome, context, evidence, constraints, acceptance criteria, completion, cancellation, and resolved decisions.
-- Git history supplies update history.
+```text
+tasks/
+  OPEN.md
+  <task-id>/
+    README.md
+    tickets/
+      01-<ticket-slug>.md
+      02-<ticket-slug>.md
+```
+
+`tasks/OPEN.md` is the manually maintained, authoritative list of open tasks:
+
+```markdown
+# Open tasks
+
+- [Task title](task-id/README.md)
+```
+
+Use that Markdown link format so the dashboard can load it. The link label can be a short description; it does not need to match the task title.
+
+List each unfinished task once in `OPEN.md`. Remove its link when it is done or canceled. Link order does not matter.
+
+## Tickets
+
+Add `tickets/` when a task needs several implementation slices. Tickets are stable planning artifacts; the parent `README.md` owns execution status, ownership, waits, and aggregate completion evidence.
+
+Number tickets from `01` in intended implementation order. Each ticket should contain one complete, verifiable slice:
+
+```markdown
+# Ticket title
+
+## Outcome
+
+The behavior or decision this slice delivers.
+
+## Acceptance criteria
+
+- [ ] Observable criterion
+
+## Blocked by
+
+None, or links to prerequisite tickets in this task.
+
+## Context
+
+Only the constraints and source references needed to implement the slice.
+```
 
 ## Validation
 
-The bundled validator is dependency-free Node.js:
+Run the validator before ending a turn that changes `OPEN.md`, a task record, or tickets. It does not need to run after each individual edit:
 
 ```sh
 node <skill-directory>/scripts/validate-tasks.mjs tasks
 ```
 
-Run it once before ending any turn that created, edited, moved, or closed a task record. It does not need to run after each individual change.
+The validator checks the task records and the `OPEN.md` link contract consumed by the dashboard. It also accepts the former `open/` and `closed/` layout while existing stores migrate.
 
 ## Statuses
 
-| Status | Use | Folder |
+| Status | Use | `OPEN.md` |
 |---|---|---|
-| `todo` | Accepted and ready, not started | `open/` |
-| `in_progress` | Work can continue now | `open/` |
-| `awaiting_decision` | The user must answer one question | `open/` |
-| `waiting` | An external event or resource is required | `open/` |
-| `done` | Outcome met with completion evidence | `closed/` |
-| `canceled` | Stopped without meeting the outcome | `closed/` |
+| `todo` | Accepted and ready, not started | Listed |
+| `in_progress` | Work can continue now | Listed |
+| `awaiting_decision` | The user must answer one question | Listed |
+| `waiting` | An external event or resource is required | Listed |
+| `done` | Outcome met with completion evidence | Not listed |
+| `canceled` | Stopped without meeting the outcome | Not listed |
 
 ## Active ownership
 
-Before changing implementation or evidence for a task, claim it with an `owner` field while setting or retaining `status: in_progress`:
+Before implementation or evidence changes begin, the coordinating agent claims the task with an `owner` field while setting or retaining `status: in_progress`:
 
 ```yaml
 status: in_progress
 owner: 8e25a58d/root
 ```
 
-`owner` combines an eight-character Session fingerprint with the agent's canonical path. Hash the full global Session ID with SHA-256, take the first eight lowercase hexadecimal characters, then append the canonical path supplied by the agent runtime. For Codex, derive the fingerprint from `CODEX_THREAD_ID`. The primary agent is `/root`; a child might be `/root/status_tests`; a nested child might be `/root/status_tests/reviewer`. The resulting owners are `8e25a58d/root`, `8e25a58d/root/status_tests`, and `8e25a58d/root/status_tests/reviewer` when `8e25a58d` is that Session's fingerprint.
+`owner` combines an eight-character Session fingerprint with the agent's canonical path. Hash the full global Session ID with SHA-256, take the first eight lowercase hexadecimal characters, then append the canonical path supplied by the agent runtime. For Codex, derive the fingerprint from `CODEX_THREAD_ID`. The primary agent is `/root`; a child might be `/root/status_tests`; a nested child might be `/root/status_tests/reviewer`.
 
-Hash the full Session ID instead of copying its literal prefix. Time-ordered IDs can share leading characters. Use the stable global Session ID and canonical agent path, not an Invocation, turn, process, opaque spawn ID, or reusable agent role. Never invent or guess either component.
+Use the stable global Session ID and canonical agent path, not an Invocation, turn, process, opaque spawn ID, or reusable agent role. Never invent or guess either component. The validator accepts a bare eight-character owner already written during migration, but do not create new owners in that legacy format.
 
-The validator accepts a bare eight-character owner already written by an active agent during migration. Do not create new owners in that legacy format.
+Each task has one coordinating owner, who may delegate work to multiple subagents. Delegated subagents work under that ownership without claiming separate tasks or replacing the owner. The coordinator maintains the task record and integrates their results. An agent may coordinate multiple active tasks. Do not work on another coordinator's task unless they delegated that work to you. If an `in_progress` task has no owner during migration, treat it as potentially active. A stale owner may be replaced only with explicit user direction.
 
-An agent may own multiple active tasks. Different agents in one Session have different owners, including parent and nested subagents. Do not edit a task owned by another agent. A subagent that changes implementation must claim its own task; a read-only helper does not claim its parent's task. If an `in_progress` task has no owner during migration, treat it as potentially active: claim it only when no concurrent work is evident. A stale owner may be replaced only with explicit user direction; never infer that an agent is dead from silence.
+Claim with one compare-and-set patch whose context includes the complete current unowned frontmatter. Check the patch result and re-read the record before touching implementation files. Stop if the patch failed or the re-read names another owner.
 
-Claim with one compare-and-set patch whose context includes the complete current unowned frontmatter. A competing ownership patch should fail after the first patch changes those lines. Check the patch result and re-read the record before touching implementation files. Stop if the patch failed or the re-read names another owner. Do not overwrite ownership with a whole-file write or a patch that omits the unowned frontmatter anchors.
-
-Remove `owner` whenever status changes away from `in_progress`. When completing or canceling owned work, change status, remove owner, add the required terminal evidence, and move the same file in one logical operation.
+Remove `owner` whenever status changes away from `in_progress`. When completing or canceling owned work, update the status, remove the owner, add the required terminal evidence, and remove the task's line from `OPEN.md` in one logical operation.
 
 ## Record format
 
@@ -80,7 +119,7 @@ status: todo
 Observable result.
 ```
 
-Add body sections only when they carry information needed to resume the task. Record facts, uncertainty, evidence, constraints, acceptance criteria, and relevant history.
+Add body sections only when they carry information needed to resume the task.
 
 ## Evidence media
 
@@ -124,13 +163,14 @@ blocked_by:
   - prerequisite-task
 ```
 
-Before setting the status to `done`, add a non-empty `## Completion` section with verification evidence. Before setting it to `canceled`, add a non-empty `## Cancellation` section with the reason. Reopening preserves that history and moves the same file back to `open/`.
+Before setting the status to `done`, add a non-empty `## Completion` section with verification evidence. Before setting it to `canceled`, add a non-empty `## Cancellation` section with the reason. Reopening preserves that history and adds the task's link back to `OPEN.md`.
 
 ## Workflow
 
-1. Search `open/` and `closed/` before creating a task.
-2. Read `CODEX_THREAD_ID` or the equivalent global Session identity and the canonical agent path supplied by the active runtime. Derive the eight-character SHA-256 Session fingerprint and append the path.
-3. Claim a task with one contextual patch before editing its implementation surfaces, then re-read the record. Stop if the patch failed or another agent owns the task.
-4. Create a task for work or evidence that must survive the current turn.
-5. Keep its record sufficient for a fresh agent to resume without chat history.
-6. Prepare required decision history, wait removal, owner removal, completion, or cancellation before changing status.
+1. Read `tasks/OPEN.md`, then search stable task directories before creating a task.
+2. Derive the active owner from the global Session identity and canonical agent path.
+3. As coordinator, claim a task with one contextual patch before implementation begins, then re-read the record. Delegated subagents work under the coordinator's claim.
+4. Create a stable task directory and add its link to `OPEN.md` when work must survive the current turn.
+5. Add numbered tickets beneath the task only when an ordered implementation breakdown is useful.
+6. Keep the task and tickets sufficient for a fresh agent to resume without chat history.
+7. Prepare required decision history, wait removal, owner removal, completion, cancellation, and `OPEN.md` changes before changing status.
