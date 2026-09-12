@@ -1,6 +1,6 @@
 ---
 name: browser-handoff
-description: Open a live website in a controllable browser and send the user a private token URL to take over when a page needs human input, such as CAPTCHA, login, MFA, consent, booking confirmation, payment confirmation, or another manual gate.
+description: Learn how to let the user take control of a live browser when a website needs their input, then resume the work afterward.
 ---
 
 # Browser Handoff
