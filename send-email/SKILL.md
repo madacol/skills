@@ -1,6 +1,6 @@
 ---
 name: send-email
-description: Send email using this server's configured babyjarvis.com or madacol.com identities. Use when sending mail or configuring a local sender.
+description: Learn how to send email from this server using a babyjarvis.com or madacol.com address.
 ---
 
 # Send Email
