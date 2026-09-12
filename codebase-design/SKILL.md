@@ -1,6 +1,6 @@
 ---
 name: codebase-design
-description: Use to learn how to design codebases around deep modules, small interfaces, clean seams, locality, and testability.
+description: Learn how to design codebases around deep modules, small interfaces, clean seams, locality, and testability.
 ---
 
 # Codebase Design
