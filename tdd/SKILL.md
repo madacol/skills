@@ -1,6 +1,6 @@
 ---
 name: tdd
-description: Use to learn how to practice test-driven development, choose testing seams, and follow the red-green-refactor loop.
+description: Learn how to develop software through tests that verify behavior and survive implementation changes.
 ---
 
 # Test-Driven Development
