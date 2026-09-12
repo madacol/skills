@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Use to learn how to review complex changes against repository standards and their originating specification.
+description: Learn how to review complex changes against repository standards and their originating specification.
 ---
 
 Two-axis review of committed or working-tree changes since a fixed point:
