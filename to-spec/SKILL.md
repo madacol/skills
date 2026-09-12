@@ -1,6 +1,6 @@
 ---
 name: to-spec
-description: Use to learn how to turn settled context into an implementation-ready specification.
+description: Learn how to turn agreed decisions into a specification that guides implementation.
 disable-model-invocation: true
 ---
 
