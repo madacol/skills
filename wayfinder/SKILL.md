@@ -1,6 +1,6 @@
 ---
 name: wayfinder
-description: Use to learn how to map and investigate large or uncertain work across sessions.
+description: Learn how to investigate an uncertain route to a goal and resolve the decisions needed to make it clear across sessions.
 disable-model-invocation: true
 ---
 
