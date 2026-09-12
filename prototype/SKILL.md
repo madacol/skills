@@ -1,6 +1,6 @@
 ---
 name: prototype
-description: Use to learn how to use throwaway logic and UI prototypes to answer design questions.
+description: Learn how to answer design questions by building throwaway prototypes of behavior or appearance.
 ---
 
 # Prototype
