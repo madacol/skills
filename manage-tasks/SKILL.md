@@ -1,6 +1,6 @@
 ---
 name: manage-tasks
-description: Use when work needs durable task state across turns or sessions.
+description: Learn how to organize work into tasks that agents can coordinate and resume across sessions.
 ---
 
 # Manage tasks
