@@ -1,6 +1,6 @@
 ---
 name: to-tickets
-description: Use to learn how to turn conversations, plans, and specifications into agent-ready ticket bundles beneath a managed task.
+description: Learn how to break planned work into tickets that agents can implement and verify.
 disable-model-invocation: true
 ---
 
