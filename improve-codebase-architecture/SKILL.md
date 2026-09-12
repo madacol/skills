@@ -1,6 +1,6 @@
 ---
 name: improve-codebase-architecture
-description: Use to learn how to review codebases for deepening, consolidation, testability, and AI navigability.
+description: Learn how to identify and explain architectural improvements that make a codebase easier to understand, change, and test.
 ---
 
 # Improve Codebase Architecture
