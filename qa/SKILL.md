@@ -1,6 +1,6 @@
 ---
 name: qa
-description: Use to learn how to turn conversational bug reports into durable tasks and implementation tickets.
+description: Learn how to turn problems reported by the user into clear, reproducible tasks for fixing them.
 ---
 
 # QA Session
