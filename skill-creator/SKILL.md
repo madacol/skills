@@ -1,6 +1,6 @@
 ---
 name: skill-creator
-description: Use to learn how the user prefers to shape skills.
+description: Learn how the user prefers to shape skills.
 ---
 
 # Create a skill
