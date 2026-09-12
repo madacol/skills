@@ -1,6 +1,6 @@
 ---
 name: unslop
-description: Use to learn how the user prefers writing to sound and which AI tells to remove.
+description: Learn how the user prefers writing to sound and which AI tells to remove.
 ---
 
 # Unslop
