@@ -101,6 +101,8 @@ Use the stable global Session ID and canonical agent path, not an Invocation, tu
 
 Each task has one coordinating owner, who may delegate work to multiple subagents. Delegated subagents work under that ownership without claiming separate tasks or replacing the owner. The coordinator maintains the task record and integrates their results. An agent may coordinate multiple active tasks. Do not work on another coordinator's task unless they delegated that work to you. If an `in_progress` task has no owner during migration, treat it as potentially active. A stale owner may be replaced only with explicit user direction.
 
+When another request interrupts a task, record the next step in its task record and keep ownership. At the start of each turn and after compaction, check the tasks linked from `OPEN.md` for your `owner`; return to interrupted work when the detour is finished.
+
 Claim with one compare-and-set patch whose context includes the complete current unowned frontmatter. Check the patch result and re-read the record before touching implementation files. Stop if the patch failed or the re-read names another owner.
 
 Remove `owner` whenever status changes away from `in_progress`. When completing or canceling owned work, update the status, remove the owner, add the required terminal evidence, and remove the task's line from `OPEN.md` in one logical operation.
@@ -164,6 +166,10 @@ blocked_by:
 ```
 
 Before setting the status to `done`, add a non-empty `## Completion` section with verification evidence. Before setting it to `canceled`, add a non-empty `## Cancellation` section with the reason. Reopening preserves that history and adds the task's link back to `OPEN.md`.
+
+## Discovered issues
+
+Record actionable issues that need follow-up in the current task if they belong to it; otherwise, create a separate task.
 
 ## Workflow
 
