@@ -15,6 +15,8 @@ Dashboard: `https://task.babyjarvis.com/<project-slug>/`
 
 ## Store layout
 
+Create each task in the project or repository that owns the files it will change, even when the request starts elsewhere.
+
 Keep task paths stable. The task directory name is its ID, `README.md` is its managed record, and any implementation tickets live beneath it:
 
 ```text
