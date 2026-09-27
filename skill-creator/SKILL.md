@@ -5,15 +5,6 @@ description: Learn how the user prefers to shape skills.
 
 # Create a skill
 
-Create `<skills-root>/<skill-name>/SKILL.md` with lowercase kebab-case names and this frontmatter:
+Identify the reusable method the agent needs to learn, beyond what a capable agent would already infer. Check nearby skills for overlap.
 
-```yaml
----
-name: skill-name
-description: Describe the situations that should trigger this skill.
----
-```
-
-Write from the perspective of a fresh-context agent handling one representative main use case. Include only what that agent needs to finish correctly. Check the other intended use cases and add only their required differences.
-
-Inspect nearby skill descriptions to avoid overlap. Add references, scripts, assets, or tests only when the intended use cases require them. Remove background and implementation details that do not change the agent's actions.
+Create `<skills-root>/<skill-name>/SKILL.md` with YAML frontmatter containing `name` and a use-case `description`. Write the shortest instructions that teach a fresh-context agent the common paths covering most requests. Leave simple variations implicit; link to a focused reference file when a complex path needs more detail. Omit one-off facts and background.
